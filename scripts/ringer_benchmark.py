@@ -18,7 +18,8 @@ from benchmarks.reliability.checker import ROOT, digest, evaluate, source_digest
 
 MODELS = ('codex:gpt-5.6-luna', 'codex:gpt-5.6-terra', 'codex:gpt-5.6-sol',
           'opencode:openrouter/moonshotai/kimi-k2.7-code', 'opencode:openrouter/z-ai/glm-5.2',
-          'opencode:openrouter/z-ai/glm-5.3-flash', 'opencode:openrouter/google/gemini-3.8-flash')
+          'opencode:openrouter/z-ai/glm-5.3-flash', 'opencode:openrouter/deepseek/deepseek-v4.1-flash',
+          'opencode:openrouter/xiaomi/mimo-v2.5', 'opencode:openrouter/google/gemini-3.8-flash')
 SCRIPT = Path(__file__).resolve()
 
 

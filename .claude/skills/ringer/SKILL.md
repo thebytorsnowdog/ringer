@@ -273,6 +273,26 @@ Pattern-selection judgment:
   read-only scout task. If it calls a model, it runs under Ringer — that is
   what makes it visible, verified, and logged.
 
+## OpenRouter probation policy (17 September 2026)
+
+Use deterministic tools first. The current GPT-6 Codex model remains the
+coordinator/reviewer. These restrictions govern OpenRouter exploration and
+implementation; they do not activate a global route.
+
+- MiMo uses `engine: opencode` and exact model `openrouter/xiaomi/mimo-v2.5`
+  only for small isolated implementation with a strong executable check.
+  Allow one attempt, overriding the general retry guidance, and require an
+  explicit positive `task_spend_allowance_gbp` after paid API authority.
+- GLM uses exact model `openrouter/z-ai/glm-5.3-flash` only for cost-first,
+  non-urgent work with an early write checkpoint and a clear stop condition.
+- DeepSeek, exact model `openrouter/deepseek/deepseek-v4.1-flash`, stays
+  disabled until a fresh no-fallback provider smoke is consistently stable.
+
+No automatic fallback or top-up. Route changes require fresh assessment.
+None of these models is globally promoted until there are 30 distinct real
+jobs in a task family plus human review. Existing API authority and budget
+limits still apply.
+
 ## Engine selection
 
 **The engine choice belongs to the human — but the recommendation comes
@@ -327,7 +347,8 @@ per task via the manifest `engine` field. Defaults are deliberate:
   Use per-task `engine_args`
   to set reasoning effort — spend it on hard tasks, not boilerplate.
 - **opencode**: the universal lane — any OpenRouter model via the `model`
-  field (engine `model_default` is GLM-5.2, the cheap-intelligence pick).
+  field. Keep `model_default` empty and select an explicit assessed route
+  under the probation policy above.
   Validate a model new to you with a trivial one-task manifest before
   trusting it with a batch.
 - Small/flash-class models are the first to choke on long conversational or

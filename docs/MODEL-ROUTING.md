@@ -112,6 +112,26 @@ the shared £90 subscription fee. Ian has authorised Astra subscription fit
 assessment for this work, not a global model change. If access, authority or
 evidence is missing, stop with `BLOCKED`. Assignments remain provisional.
 
+## OpenRouter probation policy (17 September 2026)
+
+Use deterministic tools first. The current GPT-6 Codex model remains the
+coordinator/reviewer. These restrictions govern OpenRouter exploration and
+implementation; they do not activate a global route.
+
+- MiMo uses `engine: opencode` and exact model `openrouter/xiaomi/mimo-v2.5`
+  only for small isolated implementation with a strong executable check.
+  Allow one attempt, overriding the general retry guidance, and require an
+  explicit positive `task_spend_allowance_gbp` after paid API authority.
+- GLM uses exact model `openrouter/z-ai/glm-5.3-flash` only for cost-first,
+  non-urgent work with an early write checkpoint and a clear stop condition.
+- DeepSeek, exact model `openrouter/deepseek/deepseek-v4.1-flash`, stays
+  disabled until a fresh no-fallback provider smoke is consistently stable.
+
+No automatic fallback or top-up. Route changes require fresh assessment.
+None of these models is globally promoted until there are 30 distinct real
+jobs in a task family plus human review. Existing API authority and budget
+limits still apply.
+
 ## Evidence retained
 
 The validated per-task assessment and binding are written to run state and each

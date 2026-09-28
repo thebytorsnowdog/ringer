@@ -165,7 +165,7 @@ class BenchmarkContractTests(unittest.TestCase):
         result = cli('generate', '--out', self.directory / 'no-model')
         self.assertNotEqual(0, result.returncode)
         out, manifest = self.generate(cases='utc-order,20', models=','.join(CLI.MODELS))
-        self.assertEqual(14, len(manifest['tasks']))
+        self.assertEqual(2 * len(CLI.MODELS), len(manifest['tasks']))
         self.assertEqual({'utc-order', 'cost-rate'}, {task['benchmark']['case_id'] for task in manifest['tasks']})
         self.assertTrue(all(not task['engine_args'] for task in manifest['tasks'] if task['engine'] == 'opencode'))
 

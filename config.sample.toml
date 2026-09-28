@@ -170,9 +170,10 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 
 # OpenCode + OpenRouter — the universal model harness. One engine block runs
 # ANY OpenRouter-served model: the {model} placeholder is filled per task from
-# the manifest's "model" field, falling back to model_default below. Example
-# default: GLM-5.2 (z-ai/glm-5.2, roughly $0.74/M input, $2.33/M output as of
-# 2026-07) — the cheap-intelligence lane.
+# the manifest's explicit "model" field; keep model_default empty.
+# OpenRouter routes must be explicit per task under the probation policy in
+# docs/MODEL-ROUTING.md. Historical GLM-5.2 price reference: z-ai/glm-5.2,
+# roughly $0.74/M input, $2.33/M output as of 2026-07.
 # OpenCode has no OS sandbox, so `bin` points at engines/opencode-sandboxed.sh
 # (macOS Seatbelt: network + reads open, writes confined to the task dir, a
 # per-run scratch dir, and OpenCode's state/config dirs). Auth: put your
@@ -183,7 +184,7 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # Uncomment and set an absolute path for `bin` to enable.
 # [engines.opencode]
 # bin = "/absolute/path/to/ringer/engines/opencode-sandboxed.sh"
-# model_default = "openrouter/z-ai/glm-5.2"
+# model_default = ""
 # args_template = [
 #   "{taskdir}",
 #   "{access_args}",

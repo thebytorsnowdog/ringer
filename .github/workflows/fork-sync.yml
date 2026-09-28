@@ -1,0 +1,52 @@
+name: fork sync
+
+# Weekly: fast-forward main to upstream, merge main and every feat/* branch
+# into ian, run the suite, and push only if all of that succeeds. On failure
+# it opens an issue instead. Fork-only; see docs/fork/README.md.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+jobs:
+  update-ian:
+    if: github.repository == 'thebytorsnowdog/ringer'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ian
+          # test_contributors.py audits full git history
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Update ian
+        run: |
+          # Merge commits are credited to the fork's maintainer (README Contributors).
+          git config user.name thebytorsnowdog
+          git config user.email thebytorsnowdog@users.noreply.github.com
+          scripts/fork/update-ian.sh
+      - name: Report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Fork sync failed"
+          body="The weekly update of ian failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Common causes: a feat/* branch conflicts with upstream, the suite fails, or upstream changed a workflow file (the Actions token cannot push those). Run scripts/fork/update-ian.sh on a local clone to finish the update."
+          existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

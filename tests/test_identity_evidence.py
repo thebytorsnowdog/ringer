@@ -188,8 +188,8 @@ access = "OpenRouter API"
                     "SELECT model, verdict, reasoning_effort, reported_model, expected_model FROM attempts"
                 ).fetchone(),
             )
-            self.assertEqual(3, conn.execute("PRAGMA user_version").fetchone()[0])
-            self.assertEqual(3, conn.execute("SELECT version FROM schema_version").fetchone()[0])
+            self.assertEqual(4, conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(4, conn.execute("SELECT version FROM schema_version").fetchone()[0])
             conn.execute(
                 """
                 INSERT INTO attempts(model, reported_model, expected_model, verdict)

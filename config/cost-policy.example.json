@@ -1,0 +1,35 @@
+{
+  "monthly_api_cap_gbp": 0,
+  "automatic_paid_fallback": false,
+  "subscription_auth_modes": ["chatgpt"],
+  "snapshot_max_age_seconds": 900,
+  "monthly_subscription_gbp": 90,
+  "subscription_fee_evidence": "User-confirmed ChatGPT Pro monthly fee, 2026-09-03; personal assumption, not a public plan price",
+  "fx": {
+    "usd_to_gbp": "0.7416652271549491",
+    "dated": "2026-09-02",
+    "source": "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
+  },
+  "pricing": {
+    "openrouter/moonshotai/kimi-k2.7-code": {
+      "input": "0.66", "output": "3.4", "cached": "0.18",
+      "dated": "2026-09-03", "source": "https://openrouter.ai/api/v1/models"
+    },
+    "openrouter/z-ai/glm-5.2": {
+      "input": "0.966", "output": "3.036", "cached": "0.1932",
+      "dated": "2026-09-03", "source": "https://openrouter.ai/api/v1/models"
+    },
+    "openrouter/z-ai/glm-5.3": {
+      "input": "1.4", "output": "4.4", "cached": "0.14",
+      "dated": "2026-09-03", "source": "https://openrouter.ai/api/v1/models"
+    },
+    "openrouter/z-ai/glm-5.3-flash": {
+      "input": "0.075", "output": "0.25", "cached": "0.015",
+      "dated": "2026-09-03", "source": "https://openrouter.ai/api/v1/models"
+    },
+    "openrouter/google/gemini-3.8-flash": {
+      "input": "0.75", "output": "3.75", "cached": "0.075",
+      "dated": "2026-09-04", "source": "https://openrouter.ai/api/v1/models"
+    }
+  }
+}

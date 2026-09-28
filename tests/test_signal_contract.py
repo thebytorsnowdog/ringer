@@ -281,9 +281,7 @@ source = "fixture"
 
     def test_lint_command_reports_error_and_escape_flag_passes(self) -> None:
         manifest_path = self.root / "ringer.json"
-        manifest_path.write_text(
-            json.dumps(
-                {
+        manifest_data = {
                     "run_name": "route-cli",
                     "workdir": str(self.root / "work"),
                     "tasks": [
@@ -291,6 +289,8 @@ source = "fixture"
                             "key": "grok-task",
                             "engine": "opencode",
                             "model": "openrouter/x-ai/grok-4.5",
+                            "billing_route": "api",
+                            "engine_args": ["--variant", "medium"],
                             "spec": "Create the requested output with enough detail to satisfy the route fixture contract.",
                             "check": "test -s output.txt || { echo missing; exit 1; }",
                             "expect_files": ["output.txt"],
@@ -298,12 +298,37 @@ source = "fixture"
                         }
                     ],
                 }
-            ),
-            encoding="utf-8",
+        route_config = ringer.dataclass_replace(
+            self.config,
+            engines={
+                "opencode": ringer.EngineConfig(
+                    name="opencode", bin="opencode",
+                    args_template=("run", "-m", "{model}", "{engine_args}", "{spec}"),
+                    full_access_args=(), sandbox_args=(), token_regex=None,
+                )
+            },
         )
+        assessment = ringer.assessment_draft_for_manifest(
+            Manifest.from_obj(manifest_data), route_config, coordinator="fixture"
+        )
+        assessment["strategy"] = "Exercise the deliberate noncanonical-route escape only."
+        for row in assessment["tasks"].values():
+            row.update(
+                rationale="The test deliberately compares a noncanonical route.",
+                alternative_considered="The canonical Grok harness is the normal route.",
+                context_plan="Use only the bounded fixture task.",
+                verification="Lint the registry route signal.",
+                escalation="Stop unless the explicit escape flag is present.",
+                evidence="The local registry marks this route noncanonical.",
+                uncertainty="No worker execution or quality claim is involved.",
+            )
+        manifest_data["model_assessment"] = assessment
+        manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
         real_registry = ROOT / "registry" / "model-identity.toml"
         with mock.patch.object(ringer, "default_model_registry_path", return_value=real_registry), mock.patch.object(
             ringer, "maybe_self_update"
+        ), mock.patch.object(
+            ringer.AppConfig, "load", return_value=route_config
         ):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):

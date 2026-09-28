@@ -1,0 +1,43 @@
+{
+  "run_name": "normalise-label-demo",
+  "workdir": "/absolute/path/to/ringer-work",
+  "max_parallel": 1,
+  "tasks": [
+    {
+      "key": "normalise-label",
+      "spec": "Illustrative model-assessment demo, not a benchmark. In the supplied task directory, create exactly normalise_label.py with normalise_label(text) that collapses runs of whitespace to single spaces, strips leading and trailing whitespace, and lowercases the result. Do not create or modify other files. Deterministic scripting is cheaper for this trivial job; the model run demonstrates assessed dispatch only. Do not commit. The coordinator example is gpt-6-astra at medium effort, illustrative only, not Luna pretending to be the human's coordinator.",
+      "check": "python3 -c \"import importlib.util; s=importlib.util.spec_from_file_location('normalise_label','normalise_label.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); f=m.normalise_label; assert f('  Hello   WORLD  ') == 'hello world'; assert f('\\tMixed\\nCase\\t') == 'mixed case'; assert f('   ') == ''; assert f('') == ''\"",
+      "verified": "An independent Python checker imports normalise_label.py and asserts empty, whitespace-only, mixed-case, and collapsed-whitespace behaviour.",
+      "expect_files": [
+        "normalise_label.py"
+      ],
+      "task_type": "code-feature",
+      "engine": "codex",
+      "model": "gpt-5.6-luna",
+      "billing_route": "subscription",
+      "max_attempts": 1
+    }
+  ],
+  "model_assessment": {
+    "schema": "ringer-model-assessment/v1",
+    "coordinator": "codex-orchestrator",
+    "strategy": "Coordinator example gpt-6-astra at medium effort records the fit judgement; use one bounded Luna worker at low effort, then judge the output with the independent executable check. This is illustrative, not a global route change.",
+    "tasks": {
+      "normalise-label": {
+        "binding": "sha256:92892be6bb8dade57e8f9ffacfd2579fdc52d7d0ac063482b2f272e32ddd7c85",
+        "engine": "codex",
+        "model": "gpt-5.6-luna",
+        "effort": "low",
+        "billing_route": "subscription",
+        "service_tier": "standard",
+        "rationale": "Luna at low effort is proportionate for this small mechanical implementation with an independent behavioural checker.",
+        "alternative_considered": "Deterministic scripting is cheaper for this trivial job; the assessed model run demonstrates dispatch only.",
+        "context_plan": "Provide only the self-contained task specification and isolated task directory; exact ownership is normalise_label.py.",
+        "verification": "Execute the declared checker against the implementation; it imports the module and tests empty, whitespace-only, mixed-case, and whitespace-collapsing cases.",
+        "escalation": "Stop if required source, permissions or authority are missing, or if the checker cannot prove the requirement.",
+        "evidence": "The route follows the provisional policy; this example does not claim task-family benchmark proof.",
+        "uncertainty": "Model quality and human acceptance remain unproven until the output and executed evidence are reviewed."
+      }
+    }
+  }
+}

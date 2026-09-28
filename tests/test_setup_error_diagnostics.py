@@ -169,10 +169,10 @@ class SetupErrorDiagnosticsTests(unittest.TestCase):
                 else "taskdir already exists but is not a registered git worktree"
             )
 
-            # Verdict ERROR as before — but no longer naked.
+            # Setup failure is blocked, with no invented model attempt.
             self.assertRegex(
                 combined_output,
-                re.compile(r"^stale-task\s+fail\s+ERROR\s+1\s+", re.MULTILINE),
+                re.compile(r"^stale-task\s+blocked\s+BLOCKED\s+0\s+", re.MULTILINE),
                 combined_output,
             )
 
@@ -208,11 +208,15 @@ class SetupErrorDiagnosticsTests(unittest.TestCase):
                         task.get("setup_error") or ""
                     ):
                         found_setup_error = True
+                        self.assertEqual(("blocked", "BLOCKED", 0), (task["status"], task["verdict"], task["attempts"]))
             self.assertTrue(
                 found_setup_error,
                 f"setup_error missing from run state: {state_files}",
             )
 
+            events = [json.loads(line) for line in (state_dir / "lifecycle.jsonl").read_text().splitlines()]
+            self.assertFalse(any(row["event"] == "attempt_started" for row in events))
+            self.assertEqual("BLOCKED", events[-1]["verdict"])
             return (
                 combined_output,
                 stale_taskdir.resolve(),

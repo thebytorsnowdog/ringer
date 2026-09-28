@@ -16,7 +16,9 @@ HOOK = ROOT / "hooks" / "ringer_nudge.py"
 NUDGE_TEXT = (
     "Ringer routing check: this looks like swarm-shaped work happening inline "
     "(model call/harness/edit loop outside a live Ringer run). Load the ringer "
-    "skill and route it as a manifest — a single task is a one-task manifest. "
+    "skill, record the model-fit assessment before work, and route it as a "
+    "manifest — a single task is a one-task manifest. The reminder never "
+    "authorises a model, Fast service, paid spend, or broader access. "
     "If the user explicitly asked for inline work, proceed."
 )
 

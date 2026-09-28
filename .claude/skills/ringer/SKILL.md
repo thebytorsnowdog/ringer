@@ -1,23 +1,15 @@
 ---
 name: ringer
 description: >-
-  Orchestrator playbook and routing rules for Ringer, the verified-swarm
-  delegation tool (ringer.py). TRIGGER — load BEFORE acting, not after —
-  whenever: you are about to run ANY script or command that calls a model or
-  drives a conversational/eval harness (probe, smoke test, simulation,
-  grader, persona conversation) outside a live Ringer run; you are about to
-  start an edit→test→edit loop or a batch of similar edits across files; you
-  are about to do a "quick check" that spawns a model or a CLI agent; you are
-  reviewing or diagnosing failed worker or model output; you catch yourself
-  thinking a task is "small enough to just do myself" — that thought IS the
-  trigger (a single task is a one-task manifest, and a bounded read-only
-  question is `ringer.py ask`); or you are writing or
-  reviewing a manifest, choosing a swarm pattern (review swarm, fix swarm,
-  focus group, bakeoff, research-with-proof), picking a worker engine, or
-  debugging a failed run. SKIP only for: reading or searching files, git
-  operations, a one-file few-line ONE-SHOT edit (once — if you are back for a
-  second pass, that is a loop: TRIGGER), authoring prose/specs/docs straight
-  from your own context, or pure conversation.
+  Orchestrate verified work with Ringer. Load before model-backed probes,
+  smoke tests, simulations, graders, persona harnesses or CLI agents;
+  edit-test-edit loops or batches of edits; reviews of failed worker output;
+  manifest writing, model-fit assessment, engine selection or run diagnosis.
+  Assess model fit before dispatch, then delegate implementation with an
+  executable check. A single task is a one-task manifest; bounded read-only
+  questions use ringer.py ask. Skip read-only file search, git operations,
+  prose from existing context, conversation, and one one-file, few-line,
+  one-shot edit. A second edit pass triggers Ringer.
 ---
 
 # Ringer orchestrator playbook
@@ -51,15 +43,16 @@ description: >-
 
 Ringer runs manifest tasks in parallel across cheap CLI workers (Codex,
 OpenCode/GLM, others via config) and verifies every task by **executing a
-check command** — exit 0 is the only PASS. Failed tasks are retried once
-with the check's actual failure output injected into the retry prompt. You —
+check command**. A product PASS requires an executed passing check and the
+declared file contract. Only product or missing-deliverable failures retry once
+by default, with the actual check failure in the retry prompt. You —
 the orchestrating model — pay tokens only for specs, orchestration, and
 review.
 
 ```bash
-./ringer.py lint manifest.json            # always lint before running
+./ringer.py assess manifest.json --output assessed.json
+./ringer.py lint assessed.json            # always lint before running
 ./ringer.py run manifest.json --identity <who-you-are>
-./ringer.py demo                          # 3-worker smoke test
 ./ringer.py run manifest.json --dry-run   # print the plan, spawn nothing
 ```
 
@@ -69,17 +62,71 @@ Lint catches unverifiable checks, silent checks, worktree deliverable/commit
 loss, serial fan-out, write collisions, and underspecified specs; `run`
 prints the same findings as non-blocking warnings.
 
-## The one exception: `ask`
+## Assess model fit before work
+
+Before every Ringer model job, including one-task runs, `ask`, `demo`, reviews,
+probes and repairs, record an explicit model-fit assessment in the manifest.
+This is the coordinator's judgement, not a separate model call or user
+approval. Assess complexity/risk, deterministic or cheaper alternatives,
+selected model and effort, bounded context, verification, escalation,
+billing/access and uncertainty. Make the strategy or identity state the
+current coordinator model and effort. Generate the bound zero-LLM draft with
+`./ringer.py assess manifest.json --coordinator codex-orchestrator --output assessed.json`,
+then fill every judgement field.
+
+Lint and dry-run must accept the assessment and show the resolved route before
+the run. Ringer checks every task's exact binding, engine, model, effort,
+billing route and service tier again at the runner boundary before any worker
+process or spend reservation. If execution-relevant task content or the
+checker changes, regenerate and reassess. The binding is based on the
+normalised execution record, not arbitrary raw JSON. Never use `engine_args`, config defaults,
+`--allow-noncanonical-route` or dashboard flags to bypass the recorded route.
+An engine template must forward the selected model and effort.
+
+This gate proves a matching recorded decision. It does not prove the model is
+best or create human approval. Ask for authority only when it is genuinely
+missing. `ask` first uses `--dry-run` to produce its source-bound draft and then
+requires `--assessment`; real demo workers have the same requirement. Only the
+exact bundled offline mock may skip assessment. Unknown, custom or apparently
+non-model wrappers assess or stop; scripts run directly outside Ringer do not
+call a model. See `docs/MODEL-ROUTING.md` and
+`templates/model-assessment/manifest.json`.
+
+Use deterministic tooling first. Provisional Codex routing is Luna low/medium
+for mechanical work, Terra medium for bounded everyday implementation, Sol
+medium/high for established complex implementation, and Astra medium for
+coordination/architecture, high for complex diagnosis, or xhigh/max for the
+hardest bounded unresolved decisions. Record an explicit reason for an
+override. Astra worker efforts are low, medium, high, xhigh and max; minimal
+and none are unsupported. Astra performance under Ringer is unproven. Astra `ultra` is Codex
+automatic delegation, not a routine worker effort, and remains blocked until
+delegation ownership and accounting controls are verified. Standard service is
+the default and a host's high effort is never inherited. Fast requires existing
+explicit paid authority and is never inferred from effort. Require observed
+ChatGPT authentication and quota for subscription routes. There is no
+automatic paid fallback or top-up; current API caps are £0 alongside the
+shared £90 subscription fee. Astra subscription fit assessment is authorised
+for this work, not a global model change. Never auto-route or fall back to
+another route.
+
+## Bounded read-only questions: `ask`
 
 Rule 2 holds for anything that changes a file, runs a build, or produces an
-artifact worth checking. One lane doesn't fit it: the human asks a bounded,
+artifact worth checking. One workflow is lighter: the human asks a bounded,
 read-only question over source you can already point at, and the answer is
-prose. A manifest for that is ceremony — but answering it in your own context
-means pulling whole files into a conversation that is already expensive.
+prose. It is still a Ringer model job and still needs the source-bound
+assessment; the lighter path is only the manifest shape.
 
 ```bash
-./ringer.py ask "<the human's request>" --source /absolute/path/to/source
+./ringer.py ask "<the human's request>" --source /absolute/path/to/source \
+  --model gpt-5.6-luna --reasoning-effort low --dry-run
 ```
+
+The dry-run prints a source-bound JSON assessment draft. Save it, fill every
+judgement field, then run the same command with `--assessment /path/to/assessment.json`
+and without `--dry-run` for actual execution. No automatic route changes means
+Ringer will not switch models at runtime without reassessment; the coordinator
+selects the route before work begins.
 
 `ask` selects the passages that match the request, caps the packet, spawns one
 clean worker on it, and allows a single attempt. Repeat `--source` for several
@@ -253,11 +300,12 @@ exploration candidate from `./ringer.py models --explore --task-type <type>`
 experiment. Never explore on time-critical work, never with more than a
 small slice of a batch, and name the experiment when presenting the engine
 ask so the human can veto it. Promotion ladder (computed by --explore):
-untested → probation (some evidence) → proven for a task_type (3+ tasks,
-first-try ≥ 0.67). Proven models earn bigger lanes in that type and an
-audition one rung up in adjacent types; repeated first-attempt failures end
-the audition — record the demotion in MODEL-NOTES so the next orchestrator
-doesn't re-run the experiment.
+untested → probation → proven requires at least 30 distinct jobs in the same
+named task family, first-try pass rate ≥75% and final-check pass rate ≥85%.
+Mixed families, repeated rounds of one job, identity mismatches and unattributed
+rows cannot meet the floor. A first 20-case microbenchmark is preliminary.
+This is a statistical label, separate from human quality and promotion. Keep a
+stable job_id across rounds and inspect the per-family routing_evidence.
 
 **OpenCode is the harness; the model is a manifest field.** Unless a model
 ships its own first-class harness (Codex does), it runs through the
@@ -275,7 +323,8 @@ model ran one model under three competitors' names).
 Engines are config blocks (`[engines.<name>]` in config.toml), selectable
 per task via the manifest `engine` field. Defaults are deliberate:
 
-- **codex** (default): strongest general worker. Use per-task `engine_args`
+- **codex** (public default): choose a model from the user's local evidence.
+  Use per-task `engine_args`
   to set reasoning effort — spend it on hard tasks, not boilerplate.
 - **opencode**: the universal lane — any OpenRouter model via the `model`
   field (engine `model_default` is GLM-5.2, the cheap-intelligence pick).
@@ -371,6 +420,44 @@ not free either, and nothing in the tool constrains them:
 When you claim a saving, count the whole job — every call, including your own
 planning and review. Moving tokens from your context into a worker's is only a
 saving if the total came down.
+
+## Admission, accounting and review
+
+The user's chosen engine/model policy controls this portable skill. Subscription
+and paid API routes are separate choices; an engine name or missing token count
+does not establish that a call is included. Billing is off in the public default.
+A coordinator can enable `[billing].policy_path` to a reviewed local JSON policy.
+Each task then names `billing_route` (`subscription` or `api`) and an explicit
+model. Paid API attempts also need a finite positive `task_spend_allowance_gbp`
+and available monthly/run reservations. Never switch routes automatically.
+
+With billing enabled, the runner checks admission before every actual attempt,
+including retries. Codex subscription needs fresh observed ChatGPT auth/quota
+and a command that forces `forced_login_method="chatgpt"` and forwards the exact
+model. Paid Codex needs observed API-key auth and forces `api`. Explicit paid
+OpenCode tasks require one exact OpenRouter model argument and budget admission;
+they never use subscription quota. Unsupported engines block admission.
+Sample Codex config uses `--json` and
+`{model_args}`; JSON-only identity is command-attested unless the provider reports
+its model. Usage estimates are not invoices. Unknown or interrupted paid attempts
+keep their reservations unresolved; only provider actual cost with dated FX can
+settle them. No personal subscription price or universal host model policy is
+part of this portable skill.
+
+Use finite positive `preflight_timeout_s` and `check_timeout_s` (defaults 15 and
+60 seconds), with a deliberate checker allowance. Product-only retry is the
+default. Quota, permission and interruption never retry. A pre-spawn block has
+zero model attempts; a blocked retry retains the earlier attempt evidence.
+
+Read `ringer.py outcomes --job-id JOB --read-back --json` after a run. Joined
+state, attempt and lifecycle evidence must account for all tasks. Read-back checks
+exported bytes and hashes, including explicitly declared ignored files. Product
+PASS, export PASS and human promotion are separate: a worker never creates its
+own human approval receipt. The coordinator reviews before use.
+
+References: [reliability](../../../docs/RELIABILITY.md),
+[subscription/API accounting](../../../docs/SUBSCRIPTION-COSTS.md), and
+[model comparison](../../../docs/MODEL-COMPARISON.md), relative to this skill.
 
 ## Baked-in invariants (preserve in any change to ringer.py)
 

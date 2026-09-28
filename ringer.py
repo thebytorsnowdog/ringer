@@ -34,6 +34,26 @@ import tomllib
 import urllib.parse
 import urllib.request
 import webbrowser
+import uuid
+
+from ringer_billing import (
+    Admission, admit, billing_policy_path, task_billing_fields, usage_evidence, settle_admission,
+)
+from ringer_costs import SpendLedger
+from ringer_routing import (
+    ASSESSMENT_SCHEMA,
+    ModelAssessmentError,
+    ResolvedRoute,
+    draft_model_assessment,
+    task_binding,
+    validate_model_assessment,
+)
+
+from ringer_reliability import (
+    LifecycleJournal, TERMINAL_STATUSES, classify_failure,
+    read_export_evidence, read_outcomes, reliability_fields, run_bounded,
+    sha256_file, should_retry, stop_process_tree, summarise_outcomes,
+)
 from dataclasses import asdict, dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -1073,6 +1093,9 @@ class AppConfig:
     steering: SteeringConfig = field(default_factory=SteeringConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
     engine_bin_diagnostics: tuple[EngineBinDiagnostic, ...] = ()
+    billing_policy_path: Path | None = None
+    allow_fast_service: bool = False
+    require_model_assessment: bool = False
 
     @classmethod
     def load(cls, path: Path | None = None) -> "AppConfig":
@@ -1096,6 +1119,12 @@ class AppConfig:
         identity_default = optional_string(data.get("identity_default"))
         hud_app_path = optional_path(data.get("hud_app_path"))
         allow_full_access = bool(data.get("allow_full_access", False))
+        allow_fast_service_raw = data.get("allow_fast_service", False)
+        if type(allow_fast_service_raw) is not bool:
+            raise ValueError("allow_fast_service must be true or false")
+        require_model_assessment_raw = data.get("require_model_assessment", False)
+        if type(require_model_assessment_raw) is not bool:
+            raise ValueError("require_model_assessment must be true or false")
         eval_config = load_eval_config(data.get("eval"), state_dir)
         raw_engines = data.get("engines")
         engines = load_engines(raw_engines)
@@ -1125,6 +1154,9 @@ class AppConfig:
             steering=steering_config,
             update=update_config,
             engine_bin_diagnostics=engine_bin_diagnostics,
+            billing_policy_path=billing_policy_path(data.get("billing"), config_path),
+            allow_fast_service=allow_fast_service_raw,
+            require_model_assessment=require_model_assessment_raw,
         )
 
 
@@ -1738,6 +1770,58 @@ class TaskSpec:
     # engine's {model} placeholder); empty means the engine's model_default.
     model: str = ""
     task_type: str = ""
+    check_timeout_s: float = CHECK_TIMEOUT_S
+    preflight_timeout_s: float = 15
+    preflight_command: str = ""
+    preflight_files: tuple[str, ...] = ()
+    preflight_write_paths: tuple[str, ...] = ()
+    preflight_python_modules: tuple[str, ...] = ()
+    preflight_python: str = ""
+    source_sha256: dict[str, str] = field(default_factory=dict)
+    retry_policy: str = "product"
+    retry_classes: tuple[str, ...] = ()
+    billing_route: str | None = None
+    task_spend_allowance_gbp: float | None = None
+    evidence_kind: str = "job"
+    assessment_binding: str = ""
+
+    @property
+    def execution_binding(self) -> str:
+        """Hash the current execution record, independent of caller-supplied state.
+
+        ``assessment_binding`` deliberately preserves the raw JSON hash used by
+        existing manifests.  This representation is the runner boundary's
+        source of truth, so replacing a frozen TaskSpec cannot retain a stale
+        assessment merely by carrying that raw hash forward.
+        """
+        return task_binding({
+            "key": self.key,
+            "spec": self.spec,
+            "check": self.check,
+            "engine": self.engine,
+            "expect_files": list(self.expect_files),
+            "timeout_s": self.timeout_s,
+            "max_attempts": self.max_attempts,
+            "redact_spec": self.redact_spec,
+            "full_access": self.full_access,
+            "engine_args": list(self.engine_args),
+            "verified": self.verified,
+            "model": self.model,
+            "task_type": self.task_type,
+            "check_timeout_s": self.check_timeout_s,
+            "preflight_timeout_s": self.preflight_timeout_s,
+            "preflight_command": self.preflight_command,
+            "preflight_files": list(self.preflight_files),
+            "preflight_write_paths": list(self.preflight_write_paths),
+            "preflight_python_modules": list(self.preflight_python_modules),
+            "preflight_python": self.preflight_python,
+            "source_sha256": self.source_sha256,
+            "retry_policy": self.retry_policy,
+            "retry_classes": list(self.retry_classes),
+            "billing_route": self.billing_route,
+            "task_spend_allowance_gbp": self.task_spend_allowance_gbp,
+            "evidence_kind": self.evidence_kind,
+        })
 
     @classmethod
     def from_obj(cls, obj: dict[str, Any]) -> "TaskSpec":
@@ -1747,6 +1831,12 @@ class TaskSpec:
         key = key_raw.strip()
         if not key:
             raise ValueError("task key is required")
+        if "writable_roots" in obj:
+            raise ValueError(
+                f"task {key}: writable_roots is unsupported; pass Codex sandbox roots through "
+                'engine_args, for example ["-c", '
+                '"sandbox_workspace_write.writable_roots=[\\\"/absolute/source/dir\\\"]"]'
+            )
         spec = obj.get("spec", "")
         if not isinstance(spec, str):
             raise ValueError(f"task {key}: spec must be a string")
@@ -1804,6 +1894,10 @@ class TaskSpec:
             verified=verified.strip(),
             model=model.strip(),
             task_type=task_type.strip(),
+            **reliability_fields(obj, key),
+            **task_billing_fields(obj, key),
+            evidence_kind="benchmark" if obj.get("benchmark") is not None else "job",
+            assessment_binding=task_binding(obj),
         )
 
 
@@ -1816,6 +1910,8 @@ class Manifest:
     repo: Path | None
     tasks: tuple[TaskSpec, ...]
     source_path: Path | None = None
+    job_id: str = ""
+    model_assessment: dict[str, Any] | None = None
 
     @classmethod
     def from_path(cls, path: Path) -> "Manifest":
@@ -1831,6 +1927,8 @@ class Manifest:
             repo=manifest.repo,
             tasks=manifest.tasks,
             source_path=path,
+            job_id=manifest.job_id,
+            model_assessment=manifest.model_assessment,
         )
 
     @classmethod
@@ -1840,6 +1938,9 @@ class Manifest:
             raise ValueError("run_name is required")
         if run_name == MODEL_SCOREBOARD_RUN_NAME:
             raise ValueError("run_name model-scoreboard is reserved for the scoreboard page")
+        job_id = obj.get("job_id", run_name)
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise ValueError("job_id must be a non-empty string")
         workdir_raw = obj.get("workdir")
         if not workdir_raw:
             raise ValueError("workdir is required")
@@ -1877,6 +1978,8 @@ class Manifest:
             worktrees=worktrees,
             repo=repo,
             tasks=tasks,
+            job_id=job_id.strip(),
+            model_assessment=obj.get("model_assessment"),
         )
 
     def with_max_parallel(self, value: int | None) -> "Manifest":
@@ -1892,6 +1995,8 @@ class Manifest:
             repo=self.repo,
             tasks=self.tasks,
             source_path=self.source_path,
+            job_id=self.job_id,
+            model_assessment=self.model_assessment,
         )
 
 
@@ -1905,6 +2010,7 @@ def lint_manifest(
     config: AppConfig | None = None,
     identity_registry: ModelIdentityRegistry | None = None,
     allow_noncanonical_route: bool = False,
+    require_model_assessment: bool = True,
 ) -> list[str]:
     findings: list[str] = []
     if manifest.run_name == MODEL_SCOREBOARD_RUN_NAME:
@@ -1976,6 +2082,12 @@ def lint_manifest(
                 registry=identity_registry,
             )
         )
+
+    if require_model_assessment and config is not None:
+        try:
+            validate_manifest_model_assessment(manifest, config)
+        except ModelAssessmentError as exc:
+            findings.append(f"ERROR: model assessment: {exc}")
 
     return findings
 
@@ -2190,6 +2302,26 @@ class TaskRuntime:
     setup_error: str | None = None
     last_worker_command: list[str] = field(default_factory=list)
     steering: dict[str, Any] | None = None
+    task_contract_state: str = "UNKNOWN"
+    product_state: str = "UNKNOWN"
+    promotion_state: str = "BLOCKED"
+    failure_class: str | None = None
+    export_state: str = "UNKNOWN"
+    preflight_state: str = "UNKNOWN"
+    attempt_open: bool = False
+    attempt_started: float = 0
+    current_spec: str = ""
+    current_worker: Any = None
+    current_verify: Any = None
+    billing: dict[str, Any] = field(default_factory=dict)
+    admission: Admission | None = None
+    prepared_command: tuple[list[str], str] | None = None
+    model_assessment: dict[str, str] | None = None
+
+    def evidence_level(self) -> str:
+        if self.product_state != "UNKNOWN":
+            return "executed_check_and_file_hashes" if self.export_state == "PASS" else "executed_check"
+        return "dispatch_intent" if self.attempts else "lifecycle_only"
 
     def elapsed_s(self, now: float) -> float:
         if self.started_at_monotonic is None:
@@ -2205,6 +2337,7 @@ class WorkerResult:
     tokens: int | None
     error: str | None = None
     reported_model: str | None = None
+    raw_output: str = ""
 
 
 @dataclass(frozen=True)
@@ -2283,7 +2416,9 @@ class StateWriter:
         max_parallel: int = 1,
         artifact: ArtifactConfig | None = None,
         path: Path | None = None,
+        job_id: str | None = None,
     ) -> None:
+        self.job_id = job_id or run_name
         self.run_id = run_id
         self.run_name = run_name
         self.identity = identity
@@ -2370,10 +2505,29 @@ class StateWriter:
                 task_state = {
                     "key": runtime.task.key,
                     "status": runtime.status,
+                    "task_contract_state": runtime.task_contract_state,
+                    "product_state": runtime.product_state,
+                    "promotion_state": runtime.promotion_state,
+                    "failure_class": runtime.failure_class,
+                    "export_state": runtime.export_state,
+                    "preflight_state": runtime.preflight_state,
+                    **runtime.billing,
+                    **model_command_evidence(runtime),
+                    "model_assessment": (
+                        dict(runtime.model_assessment)
+                        if runtime.model_assessment is not None
+                        else None
+                    ),
+                    "attempt_index": runtime.attempts,
+                    "check_timeout_s": runtime.task.check_timeout_s,
+                    "check_sha256": hashlib.sha256(runtime.task.check.encode()).hexdigest(),
+                    "source_sha256": dict(runtime.task.source_sha256),
+                    "evidence_level": runtime.evidence_level(),
                     "verdict": runtime.final_verdict,
                     "engine": runtime.task.engine,
                     "model": (
-                        runtime.task.model
+                        (runtime.current_worker.reported_model if runtime.current_worker else None)
+                        or runtime.task.model
                         or (engine.model_default if engine else "")
                         or effective_model_from_command(runtime.last_worker_command)
                     ),
@@ -2416,7 +2570,7 @@ class StateWriter:
                     task_state["steering"] = dict(runtime.steering)
                 tasks.append(task_state)
             pass_count = sum(1 for item in tasks if item["status"] == "pass")
-            fail_count = sum(1 for item in tasks if item["status"] == "fail")
+            fail_count = sum(1 for item in tasks if item["status"] in {"fail", "blocked", "interrupted", "not_started"})
             running_count = sum(
                 1 for item in tasks if item["status"] in {"running", "verifying", "retrying"}
             )
@@ -2430,6 +2584,7 @@ class StateWriter:
             return {
                 "run_id": self.run_id,
                 "run_name": self.run_name,
+                "job_id": self.job_id,
                 "identity": self.identity,
                 "state": "finished" if self.finished else "live",
                 "pid": self.pid,
@@ -2455,7 +2610,7 @@ class StateWriter:
         with self.lock:
             return {
                 "pass": sum(1 for runtime in self.runtimes if runtime.status == "pass"),
-                "fail": sum(1 for runtime in self.runtimes if runtime.status == "fail"),
+                "fail": sum(1 for runtime in self.runtimes if runtime.status in {"fail", "blocked", "interrupted", "not_started"}),
                 "tokens": sum(int(runtime.tokens or 0) for runtime in self.runtimes),
             }
 
@@ -3104,17 +3259,78 @@ def start_catalog_auto_refresh(
         return None
 
 
-# Promotion ladder: 3+ tasks and first-try >= 2/3 ("2 of 3"). The exact
-# fraction matters — 0.67 would misclassify a literal 2-of-3 record.
-PROVEN_MIN_TASKS = 3
-PROVEN_MIN_FIRST_TRY = 2 / 3
+# Statistical routing evidence only. Human quality and promotion stay separate.
+PROVEN_MIN_TASKS = 30  # distinct jobs within one named task family
+PROVEN_MIN_FIRST_TRY = .75
+PROVEN_MIN_FINAL_CHECK = .85
 
 
 def proven_model_group(group: dict[str, Any]) -> bool:
-    return (
-        int(group.get("tasks") or 0) >= PROVEN_MIN_TASKS
-        and float(group.get("first_try_pass_rate") or 0) >= PROVEN_MIN_FIRST_TRY
-    )
+    return not (group.get("unattributed") or group.get("misrouted")) and any(
+        family.get("task_type") not in {None, "", "(untyped)"}
+        and model_scoreboard_tier(family["distinct_jobs"], family["first_try_pass_rate"],
+                                  family["pass_rate"]) == "proven"
+        for family in group.get("routing_evidence", []))
+
+
+def routing_evidence(rows: list[dict[str, Any]], group: dict[str, Any]) -> list[dict[str, Any]]:
+    """Count stable jobs, not task rows or repeated rounds. Keep history intact.
+
+    A job's first/final result requires all its observed tasks in this family to
+    pass. Unnamed jobs, benchmarks and identity conflicts cannot establish a floor.
+    """
+    families: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = {}
+    for row in rows:
+        if model_log_row_engine(row) != group["engine"] or model_log_row_model(row) != group["model"]:
+            continue
+        if model_log_row_reasoning_effort(row) != group.get("reasoning_effort"):
+            continue
+        family = model_log_row_task_type(row)
+        if group.get("task_type") is not None and family != group["task_type"]:
+            continue
+        if family == "(untyped)" or model_log_row_is_unattributed(row):
+            continue
+        if row.get("evidence_kind") == "benchmark" or row.get("benchmark") is not None:
+            continue
+        job = model_log_text(row.get("job_id")) or model_log_text(row.get("run_name"))
+        task = model_log_text(row.get("task_key"))
+        if not job or not task:
+            continue
+        families.setdefault(family, {}).setdefault(job, {}).setdefault(task, []).append(row)
+    evidence = []
+    for family, jobs in sorted(families.items()):
+        first_passed = final_passed = count = excluded = 0
+        for tasks in jobs.values():
+            attempts = [row for task_rows in tasks.values() for row in task_rows]
+            if any(row.get("identity_mismatch") or row.get("expected_model") or
+                   (row.get("reported_model") and row["reported_model"] != group["model"]) or
+                   (row.get("effective_requested_model") and row["effective_requested_model"] != group["model"])
+                   for row in attempts):
+                excluded += 1
+                continue
+            count += 1
+            firsts, finals = [], []
+            for task_rows in tasks.values():
+                ordered = sorted(task_rows, key=lambda row: (model_log_text(row.get("logged_at")),
+                                  model_log_int(row.get("attempt_index")) or (2 if model_log_row_is_retry(row) else 1)))
+                firsts.append(ordered[0]); finals.append(ordered[-1])
+            def passed(row):
+                return model_log_text(row.get("verdict")).upper() == "PASS" and row.get("product_state", "PASS") == "PASS"
+            first_passed += all(passed(row) and not model_log_row_is_retry(row) and
+                                (model_log_int(row.get("attempt_index")) or 1) == 1 for row in firsts)
+            final_passed += all(passed(row) for row in finals)
+        evidence.append(dict(task_type=family, distinct_jobs=count, excluded_jobs=excluded,
+                             first_try_pass_rate=first_passed/count if count else 0.,
+                             pass_rate=final_passed/count if count else 0.))
+    return evidence
+
+
+def attach_routing_evidence(groups: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for group in groups:
+        group["routing_evidence"] = routing_evidence(rows, group)
+        group["tier"] = "unranked" if group.get("unattributed") or group.get("misrouted") else (
+            "proven" if proven_model_group(group) else "probation")
+    return groups
 
 
 def catalog_model_is_text_candidate(model: dict[str, Any]) -> bool:
@@ -4548,7 +4764,7 @@ def task_state_bucket(status: str) -> str:
     status = str(status).lower()
     if status == "pass":
         return "pass"
-    if status in {"fail", "error", "timeout", "died"}:
+    if status in {"fail", "error", "timeout", "died", "blocked", "interrupted", "not_started"}:
         return "fail"
     if status == "retrying":
         return "retry"
@@ -4699,6 +4915,19 @@ def render_work_group(
     # stands on its own — a failed task shows why it failed even when no
     # 'verified' sentence was written.
     verified_html = ""
+    assessment_html = ""
+    assessment = task.get("model_assessment")
+    if isinstance(assessment, dict):
+        decision = (
+            f"{assessment.get('engine', '')} / {assessment.get('model', '')} / "
+            f"{assessment.get('effort', '')} / {assessment.get('service_tier', '')} / "
+            f"{assessment.get('billing_route', '')}"
+        )
+        rationale = str(assessment.get("rationale") or "")
+        assessment_html = (
+            '<span class="verified">Model-fit decision: '
+            f"{html_escape(decision)}. {html_escape(rationale)}</span>"
+        )
     if bucket in {"pass", "fail"}:
         verified_text = str(task.get("verified") or "").strip()
         proof_tail = str(task.get("check_output_tail") or "").strip()
@@ -4730,6 +4959,7 @@ def render_work_group(
       </div>
       <div class="work-group-body">
         {items_html}
+        {assessment_html}
         {verified_html}
         <span class="links">{links_html}</span>
       </div>
@@ -5858,7 +6088,8 @@ class EvalLogger:
             db_row = {
                 key: value
                 for key, value in row.items()
-                if key not in {"model", "reasoning_effort", "task_type", "retry"}
+                if key in {"run_id", "pattern", "task_key", "spec", "worker_engine", "shepherd_model",
+                           "verify_method", "verdict", "duration_ms", "worker_tokens", "notes", "orchestrator"}
             }
             try:
                 self._conn.execute(
@@ -5926,6 +6157,8 @@ class EvalLogger:
         payload["fallback_reason"] = self._fallback_reason
         with self._fallback_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
     def _close_conn(self) -> None:
         if self._conn is not None:
@@ -6215,7 +6448,7 @@ def aggregate_model_log_rows(
             }
         )
     return sorted(
-        finalized,
+        attach_routing_evidence(finalized, rows),
         key=lambda item: (
             1 if item["unattributed"] else 0,
             item["task_type"],
@@ -6673,7 +6906,7 @@ def create_read_model_schema(conn: Any) -> None:
         row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         if row is not None:
             schema_version = int(row[0])
-    needs_stamp = user_version != 3 or schema_version != 3
+    needs_stamp = user_version != 4 or schema_version != 4
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS schema_version (
@@ -6746,6 +6979,8 @@ def create_read_model_schema(conn: Any) -> None:
         );
         """
     )
+    if not read_model_column_exists(conn, "attempts", "routing_metadata"):
+        conn.execute("ALTER TABLE attempts ADD COLUMN routing_metadata TEXT")
     if not read_model_column_exists(conn, "attempts", "reasoning_effort"):
         conn.execute("ALTER TABLE attempts ADD COLUMN reasoning_effort TEXT")
     if not read_model_column_exists(conn, "attempts", "reported_model"):
@@ -6762,8 +6997,8 @@ def create_read_model_schema(conn: Any) -> None:
         conn.executescript(
             """
             DELETE FROM schema_version;
-            INSERT INTO schema_version(version) VALUES (3);
-            PRAGMA user_version = 3;
+            INSERT INTO schema_version(version) VALUES (4);
+            PRAGMA user_version = 4;
             """
         )
 
@@ -6858,6 +7093,8 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
                 model_log_int(row.get("duration_ms")),
                 model_log_int(row.get("worker_tokens")),
                 model_log_text(row.get("orchestrator")),
+                json.dumps({key: row[key] for key in ("job_id", "run_name", "evidence_kind", "benchmark",
+                    "product_state", "attempt_index", "identity_mismatch", "effective_requested_model") if key in row}),
             )
         )
     if payloads:
@@ -6866,9 +7103,9 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
             INSERT INTO attempts (
                 run_id, task_key, logged_at, engine, model, reported_model, expected_model,
                 reasoning_effort, task_type, retry,
-                verdict, duration_ms, worker_tokens, orchestrator
+                verdict, duration_ms, worker_tokens, orchestrator, routing_metadata
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             payloads,
         )
@@ -7115,6 +7352,10 @@ def sync_read_model_db(
     with contextlib.closing(connect_read_model_db(db_path)) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            old_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+            if read_model_table_exists(conn, "attempts") and old_version != 4:
+                conn.rollback()
+                return rebuild_read_model_db(db_path, log_path, catalog_path=catalog_path, registry_path=registry_path)
             create_read_model_schema(conn)
             offset = read_sync_state_int(conn, "log_offset", 0)
             if log_size < offset:
@@ -7182,7 +7423,7 @@ def db_attempt_rows(
         query = """
             SELECT run_id, task_key, logged_at, engine, model, reported_model, expected_model,
                    reasoning_effort, task_type, retry,
-                   verdict, duration_ms, worker_tokens, orchestrator
+                   verdict, duration_ms, worker_tokens, orchestrator, routing_metadata
             FROM attempts
         """
         params: list[Any] = []
@@ -7206,6 +7447,7 @@ def db_attempt_rows(
                 "duration_ms": row["duration_ms"],
                 "worker_tokens": row["worker_tokens"],
                 "orchestrator": row["orchestrator"],
+                **json.loads(row["routing_metadata"] or "{}"),
             }
             for row in conn.execute(query, params)
         ]
@@ -7523,10 +7765,9 @@ def catalog_identity_fields(
     return {"model_display": display, "lab": lab}
 
 
-def model_scoreboard_tier(tasks: int, first_try_pass_rate: float) -> str:
-    # Same promotion rule as proven_model_group: volume alone never proves a
-    # model — a 0% pass rate with many tasks is evidence against, not for.
-    if tasks >= PROVEN_MIN_TASKS and first_try_pass_rate >= PROVEN_MIN_FIRST_TRY:
+def model_scoreboard_tier(tasks: int, first_try_pass_rate: float, final_check_pass_rate: float = 0) -> str:
+    if (tasks >= PROVEN_MIN_TASKS and first_try_pass_rate >= PROVEN_MIN_FIRST_TRY
+            and final_check_pass_rate >= PROVEN_MIN_FINAL_CHECK):
         return "proven"
     return "probation"
 
@@ -7665,31 +7906,25 @@ def aggregate_model_scoreboard_rows(
                 "task_types": breakdown_rows,
             }
         )
-    return finalized
+    return attach_routing_evidence(finalized, rows)
 
 
 def estimated_task_cost(row: dict[str, Any], catalog_model: dict[str, Any] | None) -> float | None:
-    median_tokens = row.get("median_tokens")
-    if median_tokens is None or catalog_model is None or catalog_model.get("variable_pricing"):
+    # Total tokens cannot establish the input/cache/output mix. Only a complete
+    # observed per-task actual-cost summary may be displayed as task cost.
+    if row.get("cost_coverage") != "provider_actual":
         return None
-    if catalog_model.get("free"):
-        return 0.0
+    value = row.get("median_actual_cost_usd")
     try:
-        tokens = float(median_tokens)
-        prompt_per_m = float(catalog_model.get("prompt_per_m") or 0)
-        completion_per_m = float(catalog_model.get("completion_per_m") or 0)
-    except (TypeError, ValueError):
+        cost = Decimal(str(value))
+        return float(cost) if cost.is_finite() and cost >= 0 else None
+    except (ValueError, InvalidOperation):
         return None
-    return tokens * ((prompt_per_m + completion_per_m) / 2.0) / 1_000_000
 
 
 def model_sort_cost(row: dict[str, Any], catalog_model: dict[str, Any] | None) -> float:
     cost = estimated_task_cost(row, catalog_model)
-    if cost is not None:
-        return cost
-    if row.get("median_tokens") is None:
-        return 0.0
-    return float("inf")
+    return cost if cost is not None else float("inf")
 
 
 def order_model_scoreboard_rows(
@@ -7737,7 +7972,7 @@ def fmt_task_cost(value: float | None) -> str:
 
 def fmt_short_task_cost(value: float | None) -> str:
     if value is None:
-        return "in plan"
+        return "unknown"
     if value == 0:
         return "free"
     if value < 0.10:
@@ -7779,16 +8014,8 @@ def source_file_link(path: Path, label: str) -> str:
 
 
 def model_task_cost_label(row: dict[str, Any], catalog_model: dict[str, Any] | None) -> str:
-    median_tokens = row.get("median_tokens")
-    if median_tokens is None:
-        return "in plan"
-    if catalog_model is None:
-        return "catalog missing"
-    if catalog_model.get("free"):
-        return "free"
-    if catalog_model.get("variable_pricing"):
-        return "var"
-    return fmt_short_task_cost(estimated_task_cost(row, catalog_model))
+    cost = estimated_task_cost(row, catalog_model)
+    return fmt_short_task_cost(cost) if cost is not None else "unknown"
 
 
 def rate_bar_html(value: Any) -> str:
@@ -8414,7 +8641,7 @@ def render_model_scoreboard_html(
     </div>
   </main>
   <footer class="scoreboard-footer">
-    <span>{fmt_int(rows_read)} rows read, {fmt_int(skipped)} skipped lines. Ordering sorts by evidence tier first: proven n&gt;=3, then probation; ties use first-try pass rate and pass rate. Misrouted and unattributed legacy rows are not ranked or tiered.</span>
+    <span>{fmt_int(rows_read)} rows read, {fmt_int(skipped)} skipped lines. Ordering sorts by evidence tier first: proven requires &gt;=30 distinct jobs in one named task family, first try &gt;=75% and final check &gt;=85%; otherwise probation. Repeated rounds and microbenchmarks do not meet the floor. This is a statistical label, not human quality or promotion. Ties use first-try pass rate and pass rate. Misrouted and unattributed legacy rows are not ranked or tiered.</span>
     {unregistered_pointer}
     {misrouted_pointer}
   </footer>
@@ -8703,8 +8930,11 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
 
 
 class Verifier:
+    def __init__(self) -> None:
+        self.log_paths: dict[str, Path] = {}
+
     async def verify(self, task: TaskSpec, taskdir: Path) -> VerifyResult:
-        check_returncode, check_timed_out, output = await self._run_check(task.check, taskdir)
+        check_returncode, check_timed_out, output = await self._run_check(task.check, taskdir, timeout_s=task.check_timeout_s, log_path=self.log_paths.get(task.key))
         missing_files = tuple(
             rel for rel in task.expect_files if not self._is_nonempty_file(self._expect_file_path(taskdir, rel))
         )
@@ -8742,30 +8972,13 @@ class Verifier:
         return candidate if candidate.is_absolute() else taskdir / candidate
 
     @staticmethod
-    async def _run_check(command: str, cwd: Path) -> tuple[int | None, bool, str]:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=str(cwd),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
-        )
-        timed_out = False
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=CHECK_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            timed_out = True
-            terminate_process_group(proc)
-            try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-            except asyncio.TimeoutError:
-                kill_process_group(proc)
-                stdout, _ = await proc.communicate()
-        output = stdout.decode("utf-8", errors="replace") if stdout else ""
+    async def _run_check(command: str, cwd: Path, timeout_s: float | None = None,
+                         log_path: Path | None = None) -> tuple[int | None, bool, str]:
+        timeout_s = CHECK_TIMEOUT_S if timeout_s is None else timeout_s
+        rc, timed_out, output = await run_bounded(command, cwd, timeout_s, log_path)
         if timed_out:
-            output += f"\n[ringer.py] check timed out after {CHECK_TIMEOUT_S}s\n"
-        return proc.returncode, timed_out, output
+            output += f"\n[ringer.py] check timed out after {timeout_s}s\n"
+        return rc, timed_out, output
 
 
 class RingerRunner:
@@ -8796,6 +9009,7 @@ class RingerRunner:
             self.lock,
             max_parallel=manifest.max_parallel,
             artifact=config.artifact,
+            job_id=manifest.job_id or manifest.run_name,
         )
         self.dashboard = (
             Dashboard(
@@ -8809,13 +9023,25 @@ class RingerRunner:
         )
         self.logger = EvalLogger(config.eval)
         self.verifier = Verifier()
+        self.verifier.log_paths = {r.task.key: r.log_path for r in self.runtimes}
+        self.lifecycle = LifecycleJournal(config.state_dir / "lifecycle.jsonl")
         self.semaphore = asyncio.Semaphore(manifest.max_parallel)
         self.active_processes: dict[int, asyncio.subprocess.Process] = {}
 
     async def run(self) -> int:
+        # This API boundary is deliberately ahead of workdir creation, state
+        # writers, billing admission and subprocess launch.  Programmatic
+        # callers cannot bypass the CLI's lint/dry-run checks.
+        validated_assessments = validate_manifest_model_assessment(
+            self.manifest, self.config
+        )
+        for runtime in self.runtimes:
+            runtime.model_assessment = validated_assessments.get(runtime.task.key)
         self.manifest.workdir.mkdir(parents=True, exist_ok=True)
         final_state = False
         try:
+            for runtime in self.runtimes:
+                self._event(runtime, "queued")
             self.state_writer.start()
             if self.dashboard is not None:
                 self.state_writer.set_port(self.dashboard.start())
@@ -8824,13 +9050,9 @@ class RingerRunner:
             return 0 if all(runtime.status == "pass" for runtime in self.runtimes) else 1
         except asyncio.CancelledError:
             await self.kill_all_workers()
-            with self.lock:
-                now = time.monotonic()
-                for runtime in self.runtimes:
-                    if runtime.status not in {"pass", "fail"}:
-                        runtime.status = "fail"
-                        runtime.final_verdict = "ERROR"
-                        runtime.ended_at_monotonic = runtime.ended_at_monotonic or now
+            for runtime in self.runtimes:
+                if runtime.status not in TERMINAL_STATUSES:
+                    self._interrupt_task(runtime)
             self.state_writer.flush()
             final_state = True
             raise
@@ -8842,7 +9064,7 @@ class RingerRunner:
                 self.dashboard.stop()
             self.logger.close()
             print_summary(self.run_id, self.runtimes)
-            print("Model log updated; run './ringer.py models' for the per-model scoreboard.")
+            print("Task evidence recorded; run './ringer.py outcomes' for reconciled outcomes or './ringer.py models' for the attempt scoreboard.")
             # The post-run journey: tell a human exactly where the results live.
             with contextlib.suppress(Exception):
                 if self.state_writer.artifact is not None and self.state_writer.artifact.enabled:
@@ -8851,65 +9073,259 @@ class RingerRunner:
                     print("Open it in a browser, or run './ringer.py hud' for the full Ringside view (http://127.0.0.1:8700).")
 
     async def kill_all_workers(self) -> None:
-        procs = list(self.active_processes.values())
-        for proc in procs:
-            if proc.returncode is None:
-                terminate_process_group(proc)
-        if procs:
-            await asyncio.sleep(1)
-        for proc in procs:
-            if proc.returncode is None:
-                kill_process_group(proc)
+        await asyncio.gather(*(stop_process_tree(proc) for proc in list(self.active_processes.values())))
+        self.active_processes.clear()
+
+    def _evidence(self, runtime: TaskRuntime) -> dict[str, Any]:
+        return dict(
+            job_id=self.manifest.job_id or self.manifest.run_name,
+            run_name=self.manifest.run_name, attempt_index=runtime.attempts,
+            task_contract_state=runtime.task_contract_state, product_state=runtime.product_state,
+            promotion_state="BLOCKED", failure_class=runtime.failure_class,
+            export_state=runtime.export_state, preflight_state=runtime.preflight_state,
+            source_sha256=dict(runtime.task.source_sha256),
+            check_sha256=hashlib.sha256(runtime.task.check.encode()).hexdigest(),
+            check_returncode=runtime.last_check_returncode, check_timed_out=runtime.last_check_timed_out,
+            harvested_files=[dict(item) for item in runtime.deliverables],
+            evidence_level=runtime.evidence_level(),
+            evidence_kind=runtime.task.evidence_kind,
+            **runtime.billing,
+            **model_command_evidence(runtime),
+            model_assessment=(
+                dict(runtime.model_assessment)
+                if runtime.model_assessment is not None
+                else None
+            ),
+        )
+
+    def _event(self, runtime: TaskRuntime, event: str) -> None:
+        self.lifecycle.append(dict(self._evidence(runtime), event=event, run_id=self.run_id,
+                                   task_key=runtime.task.key, status=runtime.status,
+                                   verdict=runtime.final_verdict,
+                                   model=(runtime.current_worker.reported_model if runtime.current_worker else None)
+                                         or resolved_task_model(runtime.task, self.config.engines.get(runtime.task.engine), runtime.last_worker_command),
+                                   worker_engine=runtime.task.engine,
+                                   check_output=runtime.last_check_output,
+                                   setup_error=runtime.setup_error))
+
+    def _terminal(self, runtime: TaskRuntime, status: str, verdict: str) -> None:
+        runtime.status = status
+        runtime.final_verdict = verdict
+        runtime.ended_at_monotonic = time.monotonic()
+        self._event(runtime, "terminal")
+
+    def _interrupt_task(self, runtime: TaskRuntime) -> None:
+        runtime.failure_class = "interrupted"
+        if runtime.attempt_open:
+            worker = runtime.current_worker or WorkerResult(None, False, None, error="interrupted")
+            verify = runtime.current_verify or VerifyResult(False, None, False, "check interrupted or not executed")
+            self._log_attempt(runtime, runtime.current_spec, runtime.attempts > 1, worker, verify,
+                              "INTERRUPTED", int((time.monotonic()-runtime.attempt_started)*1000))
+            runtime.final_verdict = "INTERRUPTED"
+            self._event(runtime, "attempt_finished")
+            runtime.attempt_open = False
+        self._terminal(runtime, "interrupted" if runtime.attempts else "not_started", "INTERRUPTED" if runtime.attempts else "NOT_STARTED")
 
     async def _run_task(self, runtime: TaskRuntime) -> None:
+        try:
+            await self._execute_task(runtime)
+        except asyncio.CancelledError:
+            if runtime.status not in TERMINAL_STATUSES:
+                self._interrupt_task(runtime)
+            raise
+        except Exception as exc:
+            proc = self.active_processes.pop(runtime.worker_pid, None)
+            if proc is not None:
+                await stop_process_tree(proc)
+            runtime.worker_pid = None
+            if runtime.attempts == 0:
+                runtime.setup_error = str(exc)
+                runtime.preflight_state = "BLOCKED"
+            else:
+                runtime.last_check_output += f"\n[ringer.py] runtime failure: {exc}"
+            runtime.failure_class = "permission" if isinstance(exc, PermissionError) else "unknown"
+            if runtime.attempt_open:
+                verify = runtime.current_verify or VerifyResult(False, None, False, str(exc))
+                worker = runtime.current_worker or WorkerResult(None, False, None, error=str(exc))
+                self._log_attempt(runtime, runtime.current_spec, runtime.attempts > 1, worker, verify, "ERROR",
+                                  int((time.monotonic()-runtime.attempt_started)*1000))
+                runtime.final_verdict = "ERROR"
+                self._event(runtime, "attempt_finished")
+                runtime.attempt_open = False
+            self._terminal(runtime, "fail" if runtime.attempts else "blocked", "ERROR" if runtime.attempts else "BLOCKED")
+
+    async def _preflight(self, runtime: TaskRuntime) -> tuple[str | None, str]:
+        task = runtime.task
+        if task.full_access and not self.config.allow_full_access:
+            return "permission", "full_access requested but config allow_full_access is false"
+        if task.engine not in self.config.engines:
+            return "missing_dependency", f"unknown worker engine: {task.engine}"
+        engine_bin = self.config.engines[task.engine].bin
+        candidate = Verifier._expect_file_path(runtime.taskdir, engine_bin)
+        if ("/" in engine_bin and not candidate.is_file()) or ("/" not in engine_bin and not shutil.which(engine_bin)):
+            return "missing_dependency", f"worker executable missing: {engine_bin}"
+        deadline = time.monotonic() + task.preflight_timeout_s
+        commands: list[str | list[str]] = []
+        if task.preflight_python:
+            commands.append([task.preflight_python, "-c",
+                             "import importlib,sys; [importlib.import_module(m) for m in sys.argv[1:]]",
+                             *task.preflight_python_modules])
+        if task.preflight_command:
+            commands.append(task.preflight_command)
+        for command in commands:
+            try:
+                rc, timed_out, output = await run_bounded(command, runtime.taskdir, max(.001, deadline-time.monotonic()), runtime.log_path)
+            except PermissionError as exc:
+                return "permission", str(exc)
+            except FileNotFoundError as exc:
+                return "missing_dependency", str(exc)
+            if timed_out:
+                return "unknown", f"preflight timed out after {task.preflight_timeout_s}s: {output}"
+            if rc != 0:
+                failure = classify_failure(WorkerResult(0, False, None), VerifyResult(False, rc, False, output))
+                return ("unknown" if failure == "product" else failure), f"preflight failed (exit {rc}): {output}"
+        # Isolate file reads/hashing too: a stalled filesystem must not evade the preflight deadline.
+        runtime.prepared_command = self._prepare_worker_command(runtime, task.spec)
+        local_contract = {
+            name: getattr(task, name)
+            for name in (
+                "preflight_files", "preflight_write_paths", "source_sha256", "check",
+                "expect_files",
+            )
+        }
+        local_contract.update(
+            restricted_codex=(task.engine == DEFAULT_ENGINE_NAME and not task.full_access),
+            worker_command=runtime.prepared_command[0],
+        )
+        rc, timed_out, output = await run_bounded(
+            [sys.executable, str(Path(__file__).with_name("ringer_reliability.py")),
+             "--preflight", json.dumps(local_contract)], runtime.taskdir,
+            max(.001, deadline-time.monotonic()))
+        if timed_out:
+            return "unknown", f"preflight timed out after {task.preflight_timeout_s}s while checking local inputs"
+        if rc != 0:
+            return "unknown", f"local preflight failed (exit {rc}): {output}"
+        failure, output = json.loads(output)
+        if failure:
+            return failure, output
+        return None, ""
+
+    async def _execute_task(self, runtime: TaskRuntime) -> None:
         async with self.semaphore:
-            with self.lock:
-                runtime.started_at_monotonic = time.monotonic()
+            runtime.started_at_monotonic = time.monotonic()
             prepared, prepare_error = await self._prepare_taskdir(runtime)
             if not prepared:
                 await self._record_prepare_error(runtime, prepare_error or "taskdir preparation failed")
                 return
+            failure, output = await self._preflight(runtime)
+            if failure:
+                runtime.failure_class = failure
+                await self._record_prepare_error(runtime, output)
+                return
+            runtime.preflight_state = "PASS"
             current_spec = runtime.task.spec
-            max_attempts = runtime.task.max_attempts
-            for attempt in range(1, max_attempts + 1):
-                retrying = attempt > 1
-                with self.lock:
-                    runtime.attempts = attempt
-                    runtime.status = "retrying" if retrying else "running"
-                attempt_started = time.monotonic()
+            for attempt in range(1, runtime.task.max_attempts + 1):
+                if self.config.billing_policy_path is None:
+                    runtime.billing = dict(billing_route=runtime.task.billing_route, billing_status="DISABLED")
+                # The preflight already prepared attempt 1 from the original
+                # spec; rebuilding it would re-inject steering and log it twice.
+                if attempt > 1 or runtime.prepared_command is None:
+                    runtime.prepared_command = self._prepare_worker_command(runtime, current_spec)
+                if self.config.billing_policy_path is not None:
+                    cmd, command_spec = runtime.prepared_command
+                    runtime.billing = dict(billing_route=runtime.task.billing_route,
+                        billing_status="CHECKING", billing_attempt_index=attempt,
+                        observed_auth_mode=None, quota_observed_at=None,
+                        reservation_id=None, reservation_status="not_reserved",
+                        usage_coverage="unknown", cost_coverage="unknown")
+                    self._event(runtime, "billing_checking")
+                    runtime.admission, cmd = await admit(
+                        policy_path=self.config.billing_policy_path, engine=runtime.task.engine,
+                        binary=self.config.engines[runtime.task.engine].bin, model=runtime.task.model,
+                        route=runtime.task.billing_route, allowance=runtime.task.task_spend_allowance_gbp,
+                        command=cmd, spec=command_spec, taskdir=runtime.taskdir,
+                        state_dir=self.config.state_dir, run_id=self.run_id,
+                        task_key=runtime.task.key, attempt=attempt,
+                        timeout_s=min(10, runtime.task.preflight_timeout_s))
+                    runtime.billing = runtime.admission.evidence
+                    if not runtime.admission.allowed:
+                        runtime.failure_class = runtime.billing["billing_failure_class"]
+                        runtime.setup_error = runtime.billing["billing_reason"]
+                        self._event(runtime, "billing_blocked")
+                        self._terminal(runtime, "blocked", "BLOCKED")
+                        return
+                    runtime.prepared_command = (cmd, command_spec)
+                    reservation = runtime.billing.get("reservation_id")
+                    if reservation:
+                        ledger = SpendLedger(self.config.state_dir)
+                        runtime.billing["reservation_status"] = "unresolved"
+                        if not ledger.mark_started(reservation):
+                            runtime.billing.update(billing_status="BLOCKED",
+                                billing_reason="billing reservation could not be marked started")
+                            if ledger.release(reservation, evidence={"kind": "not_dispatched"}):
+                                runtime.billing["reservation_status"] = "released"
+                            runtime.failure_class = "unknown"
+                            runtime.setup_error = runtime.billing["billing_reason"]
+                            self._event(runtime, "billing_blocked")
+                            self._terminal(runtime, "blocked", "BLOCKED")
+                            return
+                        runtime.billing["reservation_status"] = "unresolved"
+                runtime.last_worker_command = list(runtime.prepared_command[0])
+                runtime.attempts = attempt
+                runtime.status = "retrying" if attempt > 1 else "running"
+                runtime.task_contract_state = runtime.product_state = runtime.export_state = "UNKNOWN"
+                runtime.last_check_returncode = None
+                runtime.last_check_timed_out = False
+                runtime.last_check_output = ""
+                runtime.failure_class = None
+                runtime.attempt_started = time.monotonic()
+                runtime.current_spec = current_spec
+                runtime.current_worker = runtime.current_verify = None
+                # Durable intent precedes worker spawn. Queued/preflight tasks never enter the attempt journal.
+                runtime.attempt_open = True
+                self._event(runtime, "attempt_started")
+                if runtime.billing.get("reservation_id"):
+                    self._event(runtime, "billing_started")
                 worker = await self._run_worker(runtime, current_spec, attempt)
-                with self.lock:
-                    runtime.worker_pid = None
-                    runtime.status = "verifying"
-                    if worker.tokens is not None:
-                        runtime.tokens = (runtime.tokens or 0) + worker.tokens
+                runtime.current_worker = worker
+                runtime.worker_pid = None
+                runtime.status = "verifying"
+                if worker.tokens is not None:
+                    runtime.tokens = (runtime.tokens or 0) + worker.tokens
                 verify = await self.verifier.verify(runtime.task, runtime.taskdir)
+                runtime.current_verify = verify
+                runtime.last_check_returncode = verify.check_returncode
+                runtime.last_check_timed_out = verify.check_timed_out
+                runtime.last_check_output = verify.raw_output_excerpt
+                runtime.task_contract_state = ("NEEDS_CHANGE" if verify.missing_files else "PASS") if runtime.task.expect_files else "UNKNOWN"
+                runtime.product_state = "UNKNOWN" if verify.check_timed_out or verify.check_returncode is None else ("PASS" if verify.check_returncode == 0 else "NEEDS_CHANGE")
+                runtime.failure_class = classify_failure(worker, verify, worker_output=worker.raw_output)
                 verdict = verdict_for(worker, verify)
-                with self.lock:
-                    runtime.last_check_returncode = verify.check_returncode
-                    runtime.last_check_timed_out = verify.check_timed_out
-                    runtime.last_check_output = verify.raw_output_excerpt
-                duration_ms = int((time.monotonic() - attempt_started) * 1000)
-                self._log_attempt(runtime, current_spec, retrying, worker, verify, verdict, duration_ms)
+                if runtime.failure_class in {"quota", "permission"} and verdict == "PASS":
+                    verdict = "ERROR"
                 if verdict == "PASS":
                     self._harvest_deliverables_on_pass(runtime)
-                    with self.lock:
-                        runtime.status = "pass"
-                        runtime.final_verdict = verdict
-                        runtime.ended_at_monotonic = time.monotonic()
-                    await self._cleanup_worktree_on_pass(runtime)
+                    if runtime.export_state == "NEEDS_CHANGE":
+                        runtime.failure_class = "export"
+                        verdict = "FAIL"
+                runtime.final_verdict = verdict
+                duration_ms = int((time.monotonic()-runtime.attempt_started)*1000)
+                self._log_attempt(runtime, current_spec, attempt > 1, worker, verify, verdict, duration_ms)
+                self._event(runtime, "attempt_finished")
+                runtime.attempt_open = False
+                if verdict == "PASS":
+                    self._terminal(runtime, "pass", verdict)
+                    try:
+                        await self._cleanup_worktree_on_pass(runtime)
+                    except OSError as exc:
+                        runtime.deliverable_notes.append(f"worktree cleanup failed: {exc}")
+                        append_text(runtime.log_path, f"[ringer.py] worktree cleanup failed: {exc}\n")
                     return
-                if attempt < max_attempts and verdict in {"FAIL", "TIMEOUT"}:
+                if should_retry(runtime.failure_class, runtime.task, attempt, verdict):
                     failure_context = build_failure_context(runtime.log_path, verify.raw_output_excerpt)
-                    current_spec = (
-                        f"{runtime.task.spec}\n\n"
-                        f"Previous attempt failed: {failure_context}. Fix it."
-                    )
+                    current_spec = f"{runtime.task.spec}\n\nPrevious attempt failed: {failure_context}. Fix it."
                     continue
-                with self.lock:
-                    runtime.status = "fail"
-                    runtime.final_verdict = verdict
-                    runtime.ended_at_monotonic = time.monotonic()
+                self._terminal(runtime, "blocked" if runtime.failure_class in {"quota", "permission"} else "fail", verdict)
                 return
 
     def _harvest_deliverables_on_pass(self, runtime: TaskRuntime) -> None:
@@ -8943,36 +9359,48 @@ class RingerRunner:
                 )
                 candidates = candidates[:FALLBACK_HARVEST_MAX_FILES]
             expect_files = tuple(candidates)
+        errors: list[str] = []
+        used_names: set[str] = set()
         for expect_path in expect_files:
             source = Verifier._expect_file_path(runtime.taskdir, expect_path)
             try:
                 stat = source.stat()
-            except OSError:
-                continue
-            if not source.is_file():
-                continue
-            if stat.st_size > DELIVERABLE_MAX_BYTES:
-                notes.append(
-                    f"{source.name} was not copied because it is larger than 20 MB "
-                    f"({stat.st_size:,} bytes)."
-                )
-                continue
-            target = target_dir / source.name
-            try:
+                if not source.is_file() or stat.st_size == 0:
+                    raise OSError("not a non-empty regular file")
+                if stat.st_size > DELIVERABLE_MAX_BYTES:
+                    raise OSError(f"larger than 20 MB ({stat.st_size:,} bytes)")
+                name = source.name
+                if name in used_names:
+                    name = hashlib.sha256(str(source).encode()).hexdigest()[:12] + "-" + name
+                used_names.add(name)
+                target = target_dir / name
                 target.parent.mkdir(parents=True, exist_ok=True)
+                source_hash = sha256_file(source)
                 shutil.copy2(source, target)
                 copied_size = target.stat().st_size
+                copied_hash = sha256_file(target)
+                if copied_hash != source_hash or copied_size != stat.st_size:
+                    raise OSError("export bytes differ from source")
+                harvested.append(dict(name=source.name, path=str(target), bytes=copied_size,
+                                      sha256=copied_hash, source_path=str(source), source_sha256=source_hash))
             except OSError as exc:
-                append_text(
-                    runtime.log_path,
-                    f"[ringer.py] deliverable copy failed for {source.name}: {exc}\n",
-                )
-                continue
-            harvested.append({"name": source.name, "path": str(target), "bytes": copied_size})
-        if harvested or notes:
-            with self.lock:
-                runtime.deliverables = harvested
-                runtime.deliverable_notes.extend(notes)
+                error = f"deliverable export failed for {source}: {exc}"
+                errors.append(error)
+                append_text(runtime.log_path, f"[ringer.py] {error}\n")
+        runtime.deliverables = harvested
+        runtime.deliverable_notes.extend(notes + errors)
+        runtime.export_state = "NEEDS_CHANGE" if errors else ("PASS" if harvested else "UNKNOWN")
+        if harvested:
+            try:
+                atomic_write_json(target_dir / "harvest-manifest.json", {
+                    "run_id": self.run_id, "job_id": self.manifest.job_id or self.manifest.run_name,
+                    "task_key": runtime.task.key, "attempt_index": runtime.attempts,
+                    "promotion_state": "BLOCKED", "check_sha256": hashlib.sha256(runtime.task.check.encode()).hexdigest(),
+                    "files": harvested,
+                })
+            except OSError as exc:
+                runtime.export_state = "NEEDS_CHANGE"
+                runtime.deliverable_notes.append(f"harvest manifest failed: {exc}")
 
     async def _prepare_taskdir(self, runtime: TaskRuntime) -> tuple[bool, str | None]:
         taskdir = runtime.taskdir
@@ -9065,49 +9493,15 @@ class RingerRunner:
                 runtime.report_paths.update(copied)
 
     async def _record_prepare_error(self, runtime: TaskRuntime, error: str) -> None:
-        with self.lock:
-            runtime.attempts = 1
-            runtime.status = "fail"
-            runtime.final_verdict = "ERROR"
-            runtime.setup_error = error
-            runtime.ended_at_monotonic = time.monotonic()
-        # The worker log is where every other surface (HUD activity,
-        # log_tail, post-mortems) looks first — leave the reason there too.
-        with contextlib.suppress(Exception):
-            append_text(
-                runtime.log_path,
-                f"[ringer.py] task setup failed before any worker could "
-                f"spawn: {error}\n",
-            )
-        verify = VerifyResult(
-            ok=False,
-            check_returncode=None,
-            check_timed_out=False,
-            raw_output_excerpt="",
-        )
-        worker = WorkerResult(returncode=None, timed_out=False, tokens=None, error=error)
-        self._log_attempt(runtime, runtime.task.spec, False, worker, verify, "ERROR", 0)
+        runtime.setup_error = error
+        runtime.preflight_state = "BLOCKED"
+        runtime.failure_class = runtime.failure_class or "unknown"
+        append_text(runtime.log_path, f"[ringer.py] task setup failed before any worker could spawn: {error}\n")
+        self._terminal(runtime, "blocked", "BLOCKED")
 
-    async def _run_worker(self, runtime: TaskRuntime, spec: str, attempt: int) -> WorkerResult:
+    def _prepare_worker_command(self, runtime: TaskRuntime, spec: str) -> tuple[list[str], str]:
+        engine = self.config.engines[runtime.task.engine]
         log_path = runtime.log_path
-        engine = self.config.engines.get(runtime.task.engine)
-        if engine is None:
-            return WorkerResult(
-                returncode=None,
-                timed_out=False,
-                tokens=None,
-                error=f"unknown worker engine: {runtime.task.engine}",
-            )
-        if runtime.task.full_access and not self.config.allow_full_access:
-            return WorkerResult(
-                returncode=None,
-                timed_out=False,
-                tokens=None,
-                error=(
-                    f"task requested full_access with engine {runtime.task.engine}, "
-                    "but config allow_full_access is false"
-                ),
-            )
         cmd = build_worker_command(
             engine,
             taskdir=runtime.taskdir,
@@ -9115,6 +9509,8 @@ class RingerRunner:
             full_access=runtime.task.full_access,
             engine_args=runtime.task.engine_args,
             model=runtime.task.model,
+            reasoning_effort=(runtime.model_assessment or {}).get("effort", ""),
+            service_tier=(runtime.model_assessment or {}).get("service_tier", ""),
         )
         command_spec = spec
         if self.config.steering.dir is not None:
@@ -9152,6 +9548,8 @@ class RingerRunner:
                         full_access=runtime.task.full_access,
                         engine_args=runtime.task.engine_args,
                         model=runtime.task.model,
+                        reasoning_effort=(runtime.model_assessment or {}).get("effort", ""),
+                        service_tier=(runtime.model_assessment or {}).get("service_tier", ""),
                     )
                     command_spec = injected_spec
             except Exception:
@@ -9163,6 +9561,35 @@ class RingerRunner:
                 runtime.steering = steering_state
             with contextlib.suppress(Exception):
                 append_text(log_path, steering_line)
+        return cmd, command_spec
+
+    async def _run_worker(self, runtime: TaskRuntime, spec: str, attempt: int) -> WorkerResult:
+        log_path = runtime.log_path
+        if self.config.billing_policy_path is not None and (
+            runtime.admission is None or not runtime.admission.allowed
+            or runtime.billing.get("billing_attempt_index") != attempt
+            or (runtime.billing.get("reservation_id") and runtime.billing.get("reservation_status") != "unresolved")
+        ):
+            raise ValueError("billing admission required before worker launch")
+        engine = self.config.engines.get(runtime.task.engine)
+        if engine is None:
+            return WorkerResult(
+                returncode=None,
+                timed_out=False,
+                tokens=None,
+                error=f"unknown worker engine: {runtime.task.engine}",
+            )
+        if runtime.task.full_access and not self.config.allow_full_access:
+            return WorkerResult(
+                returncode=None,
+                timed_out=False,
+                tokens=None,
+                error=(
+                    f"task requested full_access with engine {runtime.task.engine}, "
+                    "but config allow_full_access is false"
+                ),
+            )
+        cmd, command_spec = runtime.prepared_command or self._prepare_worker_command(runtime, spec)
         with self.lock:
             runtime.last_worker_command = list(cmd)
         display_cmd = [
@@ -9185,6 +9612,7 @@ class RingerRunner:
             log_fh = log_path.open("ab")
         except OSError as exc:
             return WorkerResult(returncode=None, timed_out=False, tokens=None, error=str(exc))
+        output_offset = log_fh.tell()
         async with AsyncFileCloser(log_fh):
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -9205,8 +9633,27 @@ class RingerRunner:
             self.active_processes[proc.pid] = proc
             reader = asyncio.create_task(self._tee_stream(proc, log_fh, capture))
             timed_out = False
+            output_complete = True
             try:
                 await asyncio.wait_for(proc.wait(), timeout=runtime.task.timeout_s)
+            except asyncio.CancelledError:
+                await stop_process_tree(proc)
+                try:
+                    await asyncio.wait_for(asyncio.shield(reader), 1)
+                except asyncio.TimeoutError:
+                    reader.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await reader
+                self.active_processes.pop(proc.pid, None)
+                with log_path.open("rb") as usage_log:
+                    usage_log.seek(output_offset)
+                    runtime.billing.update(usage_evidence(usage_log.read().decode("utf-8", errors="replace"),
+                        runtime.task.model or engine.model_default, complete=False,
+                        service_tier=effective_service_tier_from_command(runtime.last_worker_command)))
+                runtime.current_worker = WorkerResult(proc.returncode, False,
+                    parse_token_count(capture.text(), engine.token_regex), error="interrupted",
+                    reported_model=parse_reported_model(capture.text(), engine.model_report_regex), raw_output=capture.text())
+                raise
             except asyncio.TimeoutError:
                 timed_out = True
                 terminate_process_group(proc)
@@ -9215,16 +9662,44 @@ class RingerRunner:
                 except asyncio.TimeoutError:
                     kill_process_group(proc)
                     await proc.wait()
+                await stop_process_tree(proc)
             try:
                 await asyncio.wait_for(reader, timeout=5)
             except asyncio.TimeoutError:
+                output_complete = False
+                await stop_process_tree(proc)
                 reader.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await reader
+            except asyncio.CancelledError:
+                await stop_process_tree(proc)
+                reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reader
+                self.active_processes.pop(proc.pid, None)
+                with log_path.open("rb") as usage_log:
+                    usage_log.seek(output_offset)
+                    runtime.billing.update(usage_evidence(usage_log.read().decode("utf-8", errors="replace"),
+                        runtime.task.model or engine.model_default, complete=False,
+                        service_tier=effective_service_tier_from_command(runtime.last_worker_command)))
+                raise
             self.active_processes.pop(proc.pid, None)
         output_tail = capture.text()
-        tokens = parse_token_count(output_tail, engine.token_regex)
-        reported_model = parse_reported_model(output_tail, engine.model_report_regex)
+        with log_path.open("rb") as usage_log:
+            usage_log.seek(output_offset)
+            attempt_output = usage_log.read().decode("utf-8", errors="replace")
+        usage = usage_evidence(attempt_output, runtime.task.model or engine.model_default,
+                               complete=output_complete and not timed_out and proc.returncode == 0,
+                               policy=runtime.admission.policy if runtime.admission else None,
+                               service_tier=effective_service_tier_from_command(runtime.last_worker_command))
+        if runtime.admission is not None:
+            settle_admission(runtime.admission, self.config.state_dir, usage)
+        else:
+            runtime.billing.update(usage)
+        tokens = usage.get("worker_tokens")
+        if tokens is None:
+            tokens = parse_token_count(attempt_output, engine.token_regex)
+        reported_model = parse_reported_model(attempt_output, engine.model_report_regex)
         if timed_out:
             append_text(log_path, f"\n[ringer.py] worker timed out after {runtime.task.timeout_s}s\n")
         append_text(log_path, f"[ringer.py] attempt {attempt} exited rc={proc.returncode}\n")
@@ -9233,6 +9708,7 @@ class RingerRunner:
             timed_out=timed_out,
             tokens=tokens,
             reported_model=reported_model,
+            raw_output=output_tail,
         )
 
     async def _tee_stream(
@@ -9273,14 +9749,18 @@ class RingerRunner:
             runtime.last_worker_command,
         )
         reported_model = model_log_text(worker.reported_model) or None
-        mismatch = bool(reported_model and resolved_model and reported_model != resolved_model)
+        observed_models = {event["model"] for event in runtime.billing.get("usage_events", [])
+                           if event.get("model") and event.get("model_source") in {"event", "header"}}
+        if reported_model:
+            observed_models.add(reported_model)
+        mismatch = bool(resolved_model and any(model != resolved_model for model in observed_models))
         stamped_model = reported_model or resolved_model
         expected_model = resolved_model if mismatch else None
         if mismatch:
             with contextlib.suppress(Exception):
                 append_text(
                     runtime.log_path,
-                    f"[ringer.py] identity: harness reported {reported_model} "
+                    f"[ringer.py] identity: harness reported {', '.join(sorted(observed_models))} "
                     f"but manifest/config expected {resolved_model}\n",
                 )
         reasoning_effort = effective_reasoning_effort_from_command(
@@ -9312,6 +9792,7 @@ class RingerRunner:
             {
                 "run_id": self.run_id,
                 "pattern": "ringer-py",
+                **self._evidence(runtime),
                 "task_key": runtime.task.key,
                 "spec": (
                     "[redacted request packet]"
@@ -9329,6 +9810,7 @@ class RingerRunner:
                 "model": stamped_model,
                 "reported_model": reported_model,
                 "expected_model": expected_model,
+                "identity_mismatch": mismatch,
                 "reasoning_effort": reasoning_effort,
                 "task_type": runtime.task.task_type,
                 "retry": retrying,
@@ -9455,6 +9937,8 @@ def verdict_for(worker: WorkerResult, verify: VerifyResult) -> str:
         return "ERROR"
     if worker.timed_out or verify.check_timed_out:
         return "TIMEOUT"
+    if worker.returncode not in (0, None):
+        return "FAIL"
     if verify.ok:
         return "PASS"
     return "FAIL"
@@ -9465,7 +9949,7 @@ def build_run_id(run_name: str) -> str:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", run_name.strip()).strip("-")
     # pid suffix: same-second launches of the same run_name must not collide
     # (concurrent ringer runs would otherwise share a state file and eval run_id).
-    return f"{safe_name or 'ringer'}-{stamp}-p{os.getpid()}"
+    return f"{safe_name or 'ringer'}-{stamp}-p{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
 def find_repo_identity(start: Path | None = None) -> str | None:
@@ -9527,6 +10011,9 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 
 def parse_token_count(text: str, token_regex: str | None = DEFAULT_TOKEN_REGEX) -> int | None:
+    structured = usage_evidence(text, "", complete=False)
+    if structured.get("worker_tokens") is not None:
+        return structured["worker_tokens"]
     if token_regex:
         matches = list(re.finditer(token_regex, text, flags=re.IGNORECASE))
         for match in reversed(matches):
@@ -9549,6 +10036,11 @@ def parse_token_count(text: str, token_regex: str | None = DEFAULT_TOKEN_REGEX) 
 
 
 def parse_reported_model(text: str, model_report_regex: str | None) -> str | None:
+    structured = usage_evidence(text, "", complete=False)
+    reported = [event["model"] for event in structured.get("usage_events", [])
+                if event.get("model_source") in {"event", "header"} and event.get("model")]
+    if reported:
+        return reported[-1]
     if not model_report_regex:
         return None
     match = re.search(model_report_regex, text, flags=re.IGNORECASE)
@@ -9556,6 +10048,14 @@ def parse_reported_model(text: str, model_report_regex: str | None) -> str | Non
         return None
     value = match.group(1).strip()
     return value or None
+
+
+def model_command_evidence(runtime: TaskRuntime) -> dict[str, Any]:
+    effective = effective_model_from_command(runtime.last_worker_command)
+    reported = runtime.current_worker.reported_model if runtime.current_worker else None
+    return dict(requested_model=runtime.task.model or None, effective_requested_model=effective or None,
+                model_evidence="provider-reported" if reported else "command-attested" if effective else "unobserved",
+                reported_model=reported)
 
 
 def effective_model_from_command(command: list[str]) -> str:
@@ -9583,6 +10083,254 @@ def effective_reasoning_effort_from_command(command: list[str]) -> str | None:
     return None
 
 
+def effective_service_tier_from_command(command: list[str]) -> str | None:
+    """Return one recognised Codex service tier from the effective argv.
+
+    `service_tier="default"` is the documented standard tier.  Missing,
+    repeated or unsupported settings deliberately remain unknown rather than
+    creating a cost estimate from a guess.
+    """
+    values: list[str] = []
+    for index, item in enumerate(command):
+        config = None
+        if item in {"-c", "--config"}:
+            config = command[index + 1] if index + 1 < len(command) else ""
+        elif item.startswith("--config="):
+            config = item.partition("=")[2]
+        elif item.startswith("-c") and item != "-c":
+            config = item[2:]
+        if config is None:
+            continue
+        key, separator, value = config.partition("=")
+        if separator and key.strip().strip("\"'") == "service_tier":
+            values.append(value.strip().strip("\"'").lower())
+    if len(values) != 1:
+        return None
+    return {"default": "standard", "standard": "standard", "fast": "fast"}.get(values[0])
+
+
+def _command_without_spec(command: list[str], spec: str) -> list[str]:
+    """Remove prompt text before inspecting routing flags embedded in argv."""
+    return [part.replace(spec, "") if spec and spec in part else part for part in command]
+
+
+def _model_values_from_command(command: list[str]) -> list[str]:
+    values: list[str] = []
+    for index, item in enumerate(command):
+        if item in {"-m", "--model"}:
+            values.append(command[index + 1] if index + 1 < len(command) else "")
+        elif item.startswith("--model="):
+            values.append(item.removeprefix("--model="))
+    return values
+
+
+def _config_values_from_command(command: list[str], key: str) -> list[str]:
+    values: list[str] = []
+    candidates: list[str] = []
+    for index, item in enumerate(command):
+        if item in {"-c", "--config"}:
+            candidates.append(command[index + 1] if index + 1 < len(command) else "")
+        elif item.startswith("--config="):
+            candidates.append(item.partition("=")[2])
+        elif item.startswith("-c") and item != "-c":
+            candidates.append(item[2:])
+    pattern = re.compile(
+        rf"(?:^|[,\s]){re.escape(key)}\s*=\s*[\"']?([^\"',\s]+)"
+    )
+    for candidate in candidates:
+        match = pattern.search(candidate)
+        if match:
+            values.append(match.group(1).strip())
+    return values
+
+
+def _effort_values_from_command(command: list[str]) -> list[str]:
+    values = _config_values_from_command(command, "model_reasoning_effort")
+    for index, item in enumerate(command):
+        if item in {"--variant", "--reasoning-effort"}:
+            values.append(command[index + 1] if index + 1 < len(command) else "")
+        elif item.startswith("--variant="):
+            values.append(item.partition("=")[2])
+        elif item.startswith("--reasoning-effort="):
+            values.append(item.partition("=")[2])
+    return values
+
+
+def _service_values_from_command(command: list[str]) -> list[str]:
+    values = _config_values_from_command(command, "service_tier")
+    for index, item in enumerate(command):
+        if item in {"--service-tier", "--service_tier"}:
+            values.append(command[index + 1] if index + 1 < len(command) else "")
+        elif item.startswith("--service-tier=") or item.startswith("--service_tier="):
+            values.append(item.partition("=")[2])
+    return [
+        {"default": "standard", "standard": "standard", "fast": "fast"}.get(
+            value.strip().strip("\"'").lower(), value.strip().strip("\"'").lower()
+        )
+        for value in values
+    ]
+
+
+def _single_route_value(values: list[str], task_key: str, field: str) -> str:
+    if not values or any(not value for value in values):
+        raise ModelAssessmentError(
+            f"task {task_key}: resolved command does not prove it forwards the assessed {field}; "
+            "keep the relevant placeholder in args_template"
+        )
+    if len(values) != 1:
+        raise ModelAssessmentError(
+            f"task {task_key}: resolved command contains {len(values)} {field} settings; "
+            "remove argument/config overrides and leave one assessed value"
+        )
+    return values[0]
+
+
+def is_bundled_mock_command(command: list[str], spec: str) -> bool:
+    """Exempt only an unambiguous invocation of the shipped worker."""
+    clean = _command_without_spec(command, spec)
+    bundled = (Path(__file__).resolve().parent / "engines" / "mock_worker.py").resolve()
+    if not clean:
+        return False
+
+    def is_bundled(value: str) -> bool:
+        try:
+            return Path(value).expanduser().resolve() == bundled
+        except (OSError, ValueError):
+            return False
+
+    def is_trusted_python(value: str) -> bool:
+        """Accept only this interpreter or a resolved system interpreter.
+
+        A basename is not evidence of an interpreter.  In particular, a
+        wrapper called ``python`` must not inherit the bundled mock exemption.
+        """
+        try:
+            candidate = Path(value).expanduser().resolve()
+        except (OSError, ValueError):
+            return False
+        trusted = {Path(sys.executable).resolve()}
+        base_executable = getattr(sys, "_base_executable", "")
+        if base_executable:
+            try:
+                trusted.add(Path(base_executable).resolve())
+            except (OSError, ValueError):
+                pass
+        for system_python in ("/usr/bin/python3", "/usr/bin/python"):
+            path = Path(system_python)
+            if path.exists():
+                try:
+                    trusted.add(path.resolve())
+                except OSError:
+                    pass
+        return candidate in trusted
+
+    if is_bundled(clean[0]):
+        program_end = 1
+    elif len(clean) >= 2 and is_trusted_python(clean[0]) and is_bundled(clean[1]):
+        program_end = 2
+    else:
+        return False
+    # The bundled worker accepts only its prompt.  A non-prompt argument could
+    # alter Python/program execution and must remain subject to assessment.
+    return all(not argument for argument in clean[program_end:])
+
+
+def _assessment_row(manifest: Manifest, task_key: str) -> dict[str, Any]:
+    root = manifest.model_assessment
+    if not isinstance(root, dict) or not isinstance(root.get("tasks"), dict):
+        return {}
+    row = root["tasks"].get(task_key)
+    return row if isinstance(row, dict) else {}
+
+
+def validate_manifest_model_assessment(
+    manifest: Manifest,
+    config: AppConfig,
+) -> dict[str, dict[str, str]]:
+    """Resolve and validate every real task route before any side effect."""
+    if manifest.model_assessment is None and not config.require_model_assessment:
+        # Opt-in gate: an unassessed manifest keeps upstream behaviour unless
+        # config sets require_model_assessment; a supplied one is validated.
+        return {}
+    routes: list[ResolvedRoute] = []
+    real_tasks: list[tuple[TaskSpec, EngineConfig]] = []
+    for task in manifest.tasks:
+        engine = config.engines.get(task.engine)
+        if engine is None:
+            raise ModelAssessmentError(f"task {task.key}: unknown worker engine {task.engine!r}")
+        base_command = build_worker_command(
+            engine,
+            taskdir=(manifest.workdir / task.key).resolve(),
+            spec=task.spec,
+            full_access=task.full_access,
+            engine_args=task.engine_args,
+            model=task.model,
+        )
+        if is_bundled_mock_command(base_command, task.spec):
+            continue
+        real_tasks.append((task, engine))
+    if not real_tasks:
+        return {}
+    if not isinstance(manifest.model_assessment, dict):
+        return validate_model_assessment(manifest.model_assessment, ())
+
+    for task, engine in real_tasks:
+        row = _assessment_row(manifest, task.key)
+        effort = row.get("effort") if isinstance(row.get("effort"), str) else ""
+        service = row.get("service_tier") if isinstance(row.get("service_tier"), str) else ""
+        command = build_worker_command(
+            engine,
+            taskdir=(manifest.workdir / task.key).resolve(),
+            spec=task.spec,
+            full_access=task.full_access,
+            engine_args=task.engine_args,
+            model=task.model,
+            reasoning_effort=effort,
+            service_tier=service,
+        )
+        inspected = _command_without_spec(command, task.spec)
+        model = _single_route_value(
+            _model_values_from_command(inspected), task.key, "model"
+        )
+        resolved_effort = _single_route_value(
+            _effort_values_from_command(inspected), task.key, "effort"
+        )
+        service_values = _service_values_from_command(inspected)
+        if engine.name == DEFAULT_ENGINE_NAME:
+            resolved_service = _single_route_value(
+                service_values, task.key, "service tier"
+            )
+        elif service_values:
+            resolved_service = _single_route_value(
+                service_values, task.key, "service tier"
+            )
+        else:
+            # Supported non-Codex harnesses have no paid-fast switch in their
+            # argv contract. Absence is therefore the standard route; fast is
+            # never inferred.
+            resolved_service = "standard"
+        routes.append(
+            ResolvedRoute(
+                task_key=task.key,
+                binding=task.execution_binding,
+                engine=task.engine,
+                model=model,
+                effort=resolved_effort,
+                billing_route=task.billing_route or "",
+                service_tier=resolved_service,
+            )
+        )
+    validated = validate_model_assessment(manifest.model_assessment, routes)
+    if not config.allow_fast_service:
+        fast_tasks = [route.task_key for route in routes if route.service_tier == "fast"]
+        if fast_tasks:
+            raise ModelAssessmentError(
+                f"task {fast_tasks[0]}: fast service is not authorised; set "
+                "allow_fast_service=true only after explicit paid-Fast authority"
+            )
+    return validated
+
+
 def resolved_task_model(
     task: TaskSpec,
     engine: EngineConfig | None,
@@ -9603,9 +10351,33 @@ def build_worker_command(
     full_access: bool,
     engine_args: tuple[str, ...] = (),
     model: str = "",
+    reasoning_effort: str = "",
+    service_tier: str = "",
 ) -> list[str]:
     access_args = engine.full_access_args if full_access else engine.sandbox_args
     resolved_model = model or engine.model_default
+    assessed_args: tuple[str, ...] = ()
+    joined_engine_args = "\n".join(engine_args)
+    has_effort_override = (
+        "model_reasoning_effort" in joined_engine_args
+        or "--variant" in engine_args
+        or "--reasoning-effort" in engine_args
+        or any(arg.startswith(("--variant=", "--reasoning-effort=")) for arg in engine_args)
+    )
+    has_service_override = (
+        "service_tier" in joined_engine_args
+        or "--service-tier" in engine_args
+        or "--service_tier" in engine_args
+        or any(arg.startswith(("--service-tier=", "--service_tier=")) for arg in engine_args)
+    )
+    if reasoning_effort and not has_effort_override:
+        if engine.name == DEFAULT_ENGINE_NAME:
+            assessed_args += ("-c", f"model_reasoning_effort={reasoning_effort}")
+        else:
+            assessed_args += ("--variant", reasoning_effort)
+    if service_tier and engine.name == DEFAULT_ENGINE_NAME and not has_service_override:
+        codex_tier = "default" if service_tier == "standard" else service_tier
+        assessed_args += ("-c", f"service_tier={codex_tier}")
     command = [engine.bin]
     for item in engine.args_template:
         if item == "{access_args}":
@@ -9617,6 +10389,7 @@ def build_worker_command(
             continue
         if item == "{engine_args}":
             command.extend(engine_args)
+            command.extend(assessed_args)
             continue
         if item == "{sandbox_args}":
             command.extend(engine.sandbox_args)
@@ -9626,8 +10399,8 @@ def build_worker_command(
             continue
         command.append(
             item.replace("{taskdir}", str(taskdir))
-            .replace("{spec}", spec)
             .replace("{model}", resolved_model)
+            .replace("{spec}", spec)
         )
     return command
 
@@ -10109,6 +10882,7 @@ def dry_run(
     dashboard_enabled: bool,
     force_browser: bool,
 ) -> None:
+    assessments = validate_manifest_model_assessment(manifest, config)
     print("DRY RUN: no codex workers will be spawned.")
     print(f"Run: {manifest.run_name}")
     print(f"Identity: {identity}")
@@ -10144,6 +10918,8 @@ def dry_run(
                 full_access=task.full_access,
                 engine_args=task.engine_args,
                 model=task.model,
+                reasoning_effort=(assessments.get(task.key) or {}).get("effort", ""),
+                service_tier=(assessments.get(task.key) or {}).get("service_tier", ""),
             )
             if engine is not None
             else []
@@ -10158,13 +10934,105 @@ def dry_run(
         else:
             print("    full_access: false")
         print(f"    expect_files: {list(task.expect_files)}")
+        print(f"    preflight_write_paths: {list(task.preflight_write_paths)}")
         print(f"    check: {task.check}")
+        assessment = assessments.get(task.key)
+        if assessment is None:
+            print("    model_assessment: not applicable (deterministic or bundled mock command)")
+        else:
+            print(
+                "    model_assessment: "
+                f"{assessment['engine']} / {assessment['model']} / "
+                f"{assessment['effort']} / {assessment['service_tier']} / "
+                f"{assessment['billing_route']}"
+            )
+            print(f"    assessment_binding: {assessment['binding']}")
+            print(f"    rationale: {assessment['rationale']}")
         if engine is None:
             print("    command: ERROR unknown engine")
         elif task.full_access and not config.allow_full_access:
             print("    command: ERROR full_access requires allow_full_access=true in config")
         else:
             print(f"    command: {shell_command_for_display(cmd)} < /dev/null")
+
+
+def assessment_draft_for_manifest(
+    manifest: Manifest, config: AppConfig, *, coordinator: str = ""
+) -> dict[str, Any]:
+    real_tasks: list[TaskSpec] = []
+    for task in manifest.tasks:
+        engine = config.engines.get(task.engine)
+        if engine is None:
+            real_tasks.append(task)
+            continue
+        command = build_worker_command(
+            engine,
+            taskdir=(manifest.workdir / task.key).resolve(),
+            spec=task.spec,
+            full_access=task.full_access,
+            engine_args=task.engine_args,
+            model=task.model,
+        )
+        if not is_bundled_mock_command(command, task.spec):
+            real_tasks.append(task)
+    draft = draft_model_assessment(
+        ((task.key, task.execution_binding) for task in real_tasks),
+        coordinator=coordinator,
+    )
+    for task in real_tasks:
+        row = draft["tasks"][task.key]
+        row["engine"] = task.engine
+        row["billing_route"] = task.billing_route or ""
+        engine = config.engines.get(task.engine)
+        if engine is None:
+            continue
+        command = build_worker_command(
+            engine,
+            taskdir=(manifest.workdir / task.key).resolve(),
+            spec=task.spec,
+            full_access=task.full_access,
+            engine_args=task.engine_args,
+            model=task.model,
+        )
+        inspected = _command_without_spec(command, task.spec)
+        models = _model_values_from_command(inspected)
+        efforts = _effort_values_from_command(inspected)
+        services = _service_values_from_command(inspected)
+        row["model"] = models[0] if len(models) == 1 else (task.model or engine.model_default)
+        row["effort"] = efforts[0] if len(efforts) == 1 else ""
+        row["service_tier"] = services[0] if len(services) == 1 else "standard"
+    return draft
+
+
+def load_assessment_document(path: Path) -> dict[str, Any]:
+    raw = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("assessment file must contain a JSON object")
+    nested = raw.get("model_assessment")
+    return nested if isinstance(nested, dict) else raw
+
+
+def run_assess_command(config: AppConfig, args: argparse.Namespace) -> int:
+    source = args.manifest.expanduser().resolve()
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("manifest root must be a JSON object")
+    manifest = Manifest.from_obj(raw)
+    validate_manifest_engines(manifest, config)
+    draft = assessment_draft_for_manifest(
+        manifest, config, coordinator=args.coordinator or ""
+    )
+    output = dict(raw)
+    output["model_assessment"] = draft
+    text = json.dumps(output, indent=2, ensure_ascii=False) + "\n"
+    if args.output is None:
+        print(text, end="")
+    else:
+        target = args.output.expanduser().resolve()
+        atomic_write_text(target, text)
+        print(f"assessment draft written: {target}")
+        print("Fill every blank judgement field before lint, dry-run or run.")
+    return 0
 
 
 def print_lint_findings(findings: list[str]) -> None:
@@ -10186,14 +11054,19 @@ def print_summary(run_id: str, runtimes: list[TaskRuntime]) -> None:
             f"{(runtime.final_verdict or ''):<8} {runtime.attempts:>8} "
             f"{tokens:>10} {runtime.elapsed_s(now):>10.1f}"
         )
-    setup_failures = [r for r in runtimes if r.setup_error]
+    setup_failures = [r for r in runtimes if r.setup_error and not r.attempts]
     if setup_failures:
         print("\nsetup failures (no worker was spawned):")
         for runtime in setup_failures:
             print(f"  {runtime.task.key}: {runtime.setup_error}")
+    billing_blocks = [r for r in runtimes if r.setup_error and r.attempts and r.billing.get("billing_status") == "BLOCKED"]
+    if billing_blocks:
+        print("\nretry admission blocked (earlier attempts retained):")
+        for runtime in billing_blocks:
+            print(f"  {runtime.task.key}: {runtime.setup_error}")
 
 
-def create_demo_manifest() -> Path:
+def create_demo_manifest(assessment_path: Path | None = None) -> Path:
     root = Path(tempfile.mkdtemp(prefix="ringer-demo-"))
     workdir = root / "work"
     manifest = {
@@ -10229,6 +11102,8 @@ def create_demo_manifest() -> Path:
             },
         ],
     }
+    if assessment_path is not None:
+        manifest["model_assessment"] = load_assessment_document(assessment_path)
     path = root / "ringer.json"
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return path
@@ -10277,40 +11152,45 @@ def one_request_manifest(
     reasoning_effort: str,
     model: str | None,
     redact: bool,
+    billing_route: str | None = None,
+    task_spend_allowance_gbp: float | None = None,
+    model_assessment: dict[str, Any] | None = None,
 ) -> Manifest:
     engine_args: list[str] = []
     if engine == DEFAULT_ENGINE_NAME:
         engine_args.extend(("-c", f"model_reasoning_effort={reasoning_effort}"))
-    elif model:
+    elif model and billing_route is None:
         raise ValueError("--model is currently supported only by the codex engine")
+    task_obj = {
+        "key": "answer",
+        "spec": packet.text,
+        "check": (
+            "test -s answer.md || "
+            "{ echo 'FAIL: answer.md was not created or is empty'; exit 1; }"
+        ),
+        "engine": engine,
+        "expect_files": ["answer.md"],
+        "timeout_s": timeout_s,
+        "max_attempts": 1,
+        "redact_spec": redact,
+        "engine_args": engine_args,
+        "model": model or "",
+        "billing_route": billing_route,
+        "task_spend_allowance_gbp": task_spend_allowance_gbp,
+        "verified": (
+            "answer.md exists and is not empty; this does not prove "
+            "that the answer is correct"
+        ),
+        "task_type": "one-request",
+    }
     return Manifest(
         run_name="one-request",
         workdir=workdir,
         max_parallel=1,
         worktrees=False,
         repo=None,
-        tasks=(
-            TaskSpec(
-                key="answer",
-                spec=packet.text,
-                check=(
-                    "test -s answer.md || "
-                    "{ echo 'FAIL: answer.md was not created or is empty'; exit 1; }"
-                ),
-                engine=engine,
-                expect_files=("answer.md",),
-                timeout_s=timeout_s,
-                max_attempts=1,
-                redact_spec=redact,
-                engine_args=tuple(engine_args),
-                model=model or "",
-                verified=(
-                    "answer.md exists and is not empty; this does not prove "
-                    "that the answer is correct"
-                ),
-                task_type="one-request",
-            ),
-        ),
+        tasks=(TaskSpec.from_obj(task_obj),),
+        model_assessment=model_assessment,
     )
 
 
@@ -10399,20 +11279,67 @@ def run_one_request(config: AppConfig, args: argparse.Namespace) -> int:
         (workdir / "packet.txt").write_text(packet.text, encoding="utf-8")
     packet.write_report(workdir / "packet-report.json")
     print_packet_report(packet, workdir)
-    if args.dry_run:
-        print("No model call was made.")
-        return 0
+    model = args.model
+    billing_route = getattr(args, "billing_route", None)
+    if args.engine == DEFAULT_ENGINE_NAME and billing_route is None:
+        billing_route = "subscription"
+    if config.billing_policy_path is not None:
+        if billing_route is None:
+            raise ValueError("billing-enabled ask requires an explicit --billing-route for this engine")
+    engine = config.engines.get(args.engine)
+    model = model or (engine.model_default if engine else "")
+    if config.billing_policy_path is not None:
+        if not model or not model.strip():
+            raise ValueError(
+                f"billing-enabled ask requires --model or engines.{args.engine}.model_default"
+            )
 
+    assessment = (
+        load_assessment_document(args.assessment)
+        if getattr(args, "assessment", None) is not None
+        else None
+    )
     manifest = one_request_manifest(
         packet=packet,
         workdir=workdir,
         engine=args.engine,
         timeout_s=args.timeout_s,
         reasoning_effort=args.reasoning_effort,
-        model=args.model,
+        model=model,
         redact=args.redact,
+        billing_route=billing_route,
+        task_spend_allowance_gbp=getattr(args, "task_spend_allowance_gbp", None),
+        model_assessment=assessment,
     )
     validate_manifest_engines(manifest, config)
+    if args.dry_run:
+        if assessment is None:
+            draft = assessment_draft_for_manifest(
+                manifest, config, coordinator=args.identity or ""
+            )
+            print("\nModel assessment draft (fill every blank field, save it, then pass --assessment):")
+            print(json.dumps(draft, indent=2, ensure_ascii=False))
+        else:
+            validate_manifest_model_assessment(manifest, config)
+            dry_run(
+                manifest,
+                config=config,
+                identity=args.identity or config.identity_default or "(unresolved)",
+                dashboard_enabled=True,
+                force_browser=False,
+            )
+        print("No model call was made.")
+        return 0
+    if assessment is None:
+        try:
+            validate_manifest_model_assessment(manifest, config)
+        except ModelAssessmentError as exc:
+            raise ModelAssessmentError(
+                "ask requires --assessment; run the same command with --dry-run to generate "
+                "the source-bound draft, fill its judgement fields, then pass the saved JSON"
+            ) from exc
+    else:
+        validate_manifest_model_assessment(manifest, config)
     preflight_engine_bins(manifest, config)
     identity = resolve_identity(
         args.identity,
@@ -11064,10 +11991,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_ENGINE_NAME,
         help=f"worker engine (default: {DEFAULT_ENGINE_NAME})",
     )
-    ask_parser.add_argument("--model", help="Codex model override")
+    ask_parser.add_argument("--model", help="model override (other engines also require --billing-route)")
+    ask_parser.add_argument(
+        "--billing-route", choices=("subscription", "api"),
+        help="explicit billing route; billing-enabled Codex defaults to subscription",
+    )
+    ask_parser.add_argument(
+        "--task-spend-allowance-gbp", type=float,
+        help="explicit finite positive GBP allowance for a paid API task; policy caps still apply",
+    )
     ask_parser.add_argument(
         "--reasoning-effort",
-        choices=("minimal", "low", "medium", "high"),
+        choices=("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
         default="low",
         help="Codex reasoning effort (default: low)",
     )
@@ -11125,6 +12060,20 @@ def build_parser() -> argparse.ArgumentParser:
             "a model call"
         ),
     )
+    ask_parser.add_argument(
+        "--assessment",
+        type=Path,
+        help="JSON model_assessment generated from this exact ask dry-run",
+    )
+
+    assess_parser = subparsers.add_parser(
+        "assess",
+        help="generate a zero-LLM, source-bound model assessment draft",
+    )
+    assess_parser.add_argument("manifest", type=Path, help="path to ringer manifest")
+    assess_parser.add_argument("--config", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    assess_parser.add_argument("--coordinator", help="coordinator identity to prefill")
+    assess_parser.add_argument("--output", type=Path, help="write the full draft manifest here")
 
     lint_parser = subparsers.add_parser("lint", help="lint a ringer manifest")
     lint_parser.add_argument("manifest", type=Path, help="path to ringer.json")
@@ -11133,6 +12082,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow a registry-marked noncanonical model route for a deliberate bakeoff",
     )
+
+    outcomes_parser = subparsers.add_parser("outcomes", help="reconcile task states, attempt journal and lifecycle evidence")
+    outcomes_parser.add_argument("--config", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    outcomes_parser.add_argument("--state-dir", type=Path)
+    outcomes_parser.add_argument("--log", type=Path)
+    outcomes_parser.add_argument("--job-id", help="filter a job across run rounds")
+    outcomes_parser.add_argument("--json", action="store_true")
+    outcomes_parser.add_argument("--read-back", action="store_true", help="rehash exported files against their recorded evidence")
 
     hud_parser = subparsers.add_parser("hud", help="start the persistent Ringside page in your browser")
     hud_parser.add_argument("--config", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
@@ -11185,6 +12142,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable zero-LLM HTML status/report artifacts (see [artifact] in config.toml)",
     )
     demo_parser.add_argument("--dry-run", action="store_true", help="print the demo plan without spawning codex")
+    demo_parser.add_argument(
+        "--assessment", type=Path,
+        help="JSON model_assessment bound to the generated demo tasks",
+    )
 
     install_parser = subparsers.add_parser("install-agent", help="install the ringer skill and hooks for Claude Code or Codex")
     install_parser.add_argument("--project", action="store_true", help="install under the current project instead of the user config directory")
@@ -11248,9 +12209,16 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "lint":
             manifest = Manifest.from_path(args.manifest)
-            print_engine_bin_diagnostics_if_config_loads(args.config)
+            # Lint must not depend on a loadable config; with one, it also
+            # checks model routes and any model assessment.
+            lint_config = None
+            with contextlib.suppress(Exception):
+                lint_config = AppConfig.load(args.config)
+            if lint_config is not None:
+                print_engine_bin_diagnostics(lint_config)
             findings = lint_manifest(
                 manifest,
+                config=lint_config,
                 allow_noncanonical_route=args.allow_noncanonical_route,
             )
             if findings:
@@ -11264,6 +12232,35 @@ def main(argv: list[str] | None = None) -> int:
 
         config = AppConfig.load(args.config)
         print_engine_bin_diagnostics(config)
+        if args.command == "assess":
+            return run_assess_command(config, args)
+        if args.command == "outcomes":
+            payload = read_outcomes(args.state_dir or config.state_dir, args.log or config.eval.jsonl_path)
+            if args.job_id:
+                payload.update(summarise_outcomes([t for t in payload["tasks"] if t["job_id"] == args.job_id]))
+            if args.read_back:
+                for task in payload["tasks"]:
+                    files = task["harvested_files"]
+                    task["export_read_back"] = read_export_evidence(files)
+                    task["export_evidence_available"] = any(f.get("sha256") for f in files)
+                readbacks = [f for task in payload["tasks"] for f in task["export_read_back"]]
+                payload["export_read_back_totals"] = dict(
+                    matched=sum(f["matches"] is True for f in readbacks),
+                    mismatched_or_missing=sum(f["matches"] is False for f in readbacks),
+                    unknown=sum(f["matches"] is None for f in readbacks),
+                    tasks_without_recorded_hashes=sum(not t["export_evidence_available"] for t in payload["tasks"]))
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(json.dumps(payload["totals"], indent=2, sort_keys=True))
+                print("Model attribution:", json.dumps(payload["model_attribution"], sort_keys=True))
+                if args.read_back:
+                    print("Export read-back:", json.dumps(payload["export_read_back_totals"], sort_keys=True))
+                for task in payload["tasks"]:
+                    print(f"{task['job_id']} / {task['run_id']} / {task['task_key']}: {task['status']}; product={task['product_state']}; promotion=BLOCKED; failure={task['failure_class']}")
+                if payload["read_errors"] or any(payload["malformed_rows"].values()):
+                    print("Read errors:", payload["read_errors"], payload["malformed_rows"])
+            return 0
         if args.command == "db":
             return run_db_command(config, args)
         if args.command == "models":
@@ -11280,7 +12277,7 @@ def main(argv: list[str] | None = None) -> int:
             return run_one_request(config, args)
 
         if args.command == "demo":
-            manifest_path = create_demo_manifest()
+            manifest_path = create_demo_manifest(args.assessment)
             print(f"Demo manifest: {manifest_path}")
         else:
             manifest_path = args.manifest
@@ -11294,6 +12291,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_noncanonical_route=bool(
                 getattr(args, "allow_noncanonical_route", False)
             ),
+            require_model_assessment=not bool(getattr(args, "baseline", False)),
         )
         print_lint_findings(lint_findings)
         if any(finding.startswith("ERROR:") for finding in lint_findings):

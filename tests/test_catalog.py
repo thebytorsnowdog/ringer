@@ -265,7 +265,8 @@ class CatalogTests(unittest.TestCase):
 
         output = out.getvalue()
         self.assertEqual(0, rc)
-        self.assertIn("proven    ", output)
+        # Three task rows cannot establish the 30 distinct named-job floor.
+        self.assertNotIn("proven    ", output)
         self.assertIn("probation ", output)
         self.assertIn("untested  free-candidate:free", output)
         self.assertIn("untested  cheap-candidate", output)

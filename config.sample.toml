@@ -8,6 +8,13 @@
 # identity_default = "codex-mini"
 
 # State files live under <state_dir>/runs/<run_id>.json.
+# Append-only task lifecycle evidence lives in <state_dir>/lifecycle.jsonl.
+# Read joined state/attempt evidence with: ringer.py outcomes --json --read-back
+# Reliability options are task manifest fields, not engine or global settings:
+# check_timeout_s (default 60), preflight_timeout_s (15), preflight_command,
+# preflight_files, preflight_python_modules, preflight_python, source_sha256,
+# retry_policy (product; explicit legacy available), retry_classes.
+# Run-level job_id defaults to run_name. See docs/RELIABILITY.md for examples.
 state_dir = "~/.ringer"
 
 # First localhost port tried for the per-run dashboard. The server will scan the
@@ -21,6 +28,28 @@ dashboard_port_base = 8787
 # Belt-and-suspenders full-access gate. A task with "full_access": true will
 # still fail unless this is true.
 allow_full_access = false
+
+# Standard service is the default. Set this only after the user has explicitly
+# authorised paid Fast service. A model-fit assessment must still record
+# service_tier="fast" for each matching task; effort never implies Fast.
+allow_fast_service = false
+
+# Require a model-fit assessment (ringer.py assess) on every manifest that
+# dispatches a real model. Off by default: an unassessed manifest then runs as
+# upstream Ringer does, while a supplied assessment is always validated.
+# require_model_assessment = true
+
+# Optional executed billing admission. Omit this table to keep billing off.
+# The path is relative to this config file unless absolute. Copy and review
+# config/cost-policy.example.json; no account fee or FX is a runner default.
+# [billing]
+# policy_path = "/absolute/path/to/cost-policy.json"
+# Each task then needs an explicit model and billing_route="subscription" or
+# "api". API also needs a finite positive task_spend_allowance_gbp plus policy
+# monthly/run caps. Every Codex attempt, including retry, observes auth again.
+# See docs/SUBSCRIPTION-COSTS.md and README.md for admission/evidence limits.
+# Model-fit validation runs before billing admission, so an invalid or stale
+# assessment cannot reserve spend. It does not relax any policy cap.
 
 [update]
 # Check origin/main before command dispatch and let a long-running HUD check
@@ -64,12 +93,15 @@ bin = "codex"
 #   "model" or this engine sets model_default; otherwise it expands to nothing,
 #   preserving Codex's configured default. Setting model_default = "gpt-5.6-sol"
 #   pins the model instead of inheriting ~/.codex/config.toml drift and makes
-#   scoreboard attribution exact.
-# - {engine_args}: expands to the task's optional "engine_args" list — the orchestrator
-#   sets per-task flags here, e.g. ["-c", "model_reasoning_effort=medium"] to match
-#   reasoning depth to task difficulty instead of inheriting the CLI-wide default
+#   requested-model attribution explicit. JSON-only output is command-attested,
+#   not provider-verified. Billing requires the model explicitly on each task.
+# - {engine_args}: expands to the task's optional "engine_args" list. Ringer
+#   inserts the assessed effort and service setting here. Keep this placeholder
+#   or the pre-dispatch gate cannot prove that the command forwards the route.
+#   Do not put model, effort or service overrides in task engine_args.
 args_template = [
   "exec",
+  "--json",
   "--skip-git-repo-check",
   "{access_args}",
   "{model_args}",
@@ -121,8 +153,8 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # ]
 # sandbox_args = ["--sandbox", "workspace"]
 # full_access_args = ["--sandbox", "off", "--permission-mode", "bypassPermissions"]
-# Grok's JSON output carries no usage/token fields (verified v0.2.81) — plan
-# CLIs report cost as "included in plan"; regex is a harmless no-match. Its JSON
+# Grok's JSON output carries no usage/token fields (verified v0.2.81).
+# Missing usage leaves cost unknown; it does not establish subscription coverage. Its JSON
 # also does not self-report a model, so no model_report_regex is configured.
 # token_regex = "\"total_tokens\"\\s*:\\s*([0-9]+)"
 

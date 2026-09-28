@@ -62,7 +62,7 @@ def _receipt(
     reviewer_type: str = "human",
     reviewed_at: str = "2026-08-07T18:00:00+00:00",
     decision: str = "APPROVED",
-    evidence: str = "I opened the viewer in a browser and inspected the bridge sample.",
+    evidence: str = "I opened the viewer in a browser and inspected the sample.",
     schema_version: str = "1.0",
 ) -> dict:
     return {
@@ -118,7 +118,7 @@ def test_promotion(failures: list[str]) -> None:
     ok = _bind(failures)
     with tempfile.TemporaryDirectory() as td:
         work = pathlib.Path(td)
-        artifact = work / "bridge-asset-viewer.html"
+        artifact = work / "sample-viewer.html"
         _write(artifact, "<!doctype html><html><body>artifact bytes</body></html>\n")
         artifact_name = artifact.name
         actual_sha = _sha(artifact)
@@ -177,7 +177,7 @@ def test_promotion(failures: list[str]) -> None:
         ok(proc.stdout.startswith("BLOCKED: promotion"), f"impossible evidence should start BLOCKED (got {proc.stdout!r})")
 
         # Confirm the gate never created human-review.json inside the repo.
-        repo_receipt = REPO / ".ringer-work" / "bridge-asset-viewer" / "human-review.json"
+        repo_receipt = REPO / ".ringer-work" / "sample-viewer" / "human-review.json"
         ok(not repo_receipt.exists(), "the gate must not create human-review.json inside the repository")
 
 

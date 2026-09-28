@@ -14,6 +14,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -79,6 +80,11 @@ class DeliverableTests(unittest.TestCase):
         self.old_env = os.environ.copy()
         self.addCleanup(self.restore_env)
         self.root = Path(self.tmp.name)
+        # The one runner execution below tests deliverable harvesting with a
+        # local Python fixture.  Keep the production gate real elsewhere.
+        gate = patch.object(ringer, "validate_manifest_model_assessment", return_value={})
+        gate.start()
+        self.addCleanup(gate.stop)
         os.environ["HOME"] = str(self.root / "home")
         os.environ["RINGER_HOME"] = str(self.root / "ringer-home")
         self.state_dir = self.root / "state"
@@ -194,9 +200,12 @@ class DeliverableTests(unittest.TestCase):
         self.assertFalse(
             (self.artifacts_dir / "deliverables" / runner.run_id / "task-one" / "huge.bin").exists()
         )
-        self.assertEqual(1, len(runtime.deliverable_notes))
-        self.assertIn("huge.bin", runtime.deliverable_notes[0])
-        self.assertIn("20 MB", runtime.deliverable_notes[0])
+        self.assertEqual(2, len(runtime.deliverable_notes))
+        self.assertEqual("NEEDS_CHANGE", runtime.export_state)
+        notes = "\n".join(runtime.deliverable_notes)
+        self.assertIn("missing.txt", notes)
+        self.assertIn("huge.bin", notes)
+        self.assertIn("20 MB", notes)
 
     def test_harvest_falls_back_to_taskdir_when_no_expect_files(self) -> None:
         task = TaskSpec(

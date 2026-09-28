@@ -61,7 +61,10 @@ class RingerCliTests(unittest.TestCase):
                 [
                     f"[engines.{name}]",
                     'bin = "/bin/sh"',
-                    f"args_template = {json.dumps(args_template)}",
+                    # These are shell fixtures, but deliberately look like a
+                    # model route to the runner.  Everything after `sh -c`
+                    # is harmless positional input to the fixture script.
+                    f"args_template = {json.dumps([*args_template, 'fixture-shell', '{model_args}', '{engine_args}'])}",
                     "sandbox_args = []",
                     "full_access_args = []",
                     'token_regex = "tokens\\\\s+used\\\\s*:?\\\\s*([0-9][0-9,]*)"',
@@ -71,6 +74,37 @@ class RingerCliTests(unittest.TestCase):
         self.config_path.write_text("\n".join(lines), encoding="utf-8")
 
     def write_manifest(self, name: str, manifest: dict[str, object]) -> Path:
+        # Keep subprocess coverage honest: local shell workers are not the
+        # bundled mock exemption, so give each one a complete, command-bound
+        # offline assessment rather than patching the gate in the parent.
+        for task in manifest["tasks"]:
+            task.setdefault("model", "fixture-shell-model")
+            task.setdefault("billing_route", "subscription")
+        config = ringer.AppConfig.load(self.config_path)
+        try:
+            parsed = ringer.Manifest.from_obj(manifest)
+        except ValueError:
+            # Parsing-path regressions deliberately reject before there is a
+            # task route to assess. Keep those negative CLI checks intact.
+            path = self.root / f"{name}.json"
+            path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            return path
+        assessment = ringer.assessment_draft_for_manifest(
+            parsed, config, coordinator="test-runner"
+        )
+        assessment["strategy"] = "Exercise the local shell fixture through the real runner gate."
+        for row in assessment["tasks"].values():
+            row.update(
+                effort="medium",
+                rationale="The fixture tests runner lifecycle behaviour with a local shell command.",
+                alternative_considered="A parent-process gate patch would not cover subprocess validation.",
+                context_plan="Use only the manifest task and its local shell command.",
+                verification="Assert the original fixture outputs, state and lifecycle evidence.",
+                escalation="Stop if the runner rejects a matching route or assessment.",
+                evidence="The command, manifest and assessment are deterministic local test fixtures.",
+                uncertainty="This does not evidence live model quality, entitlement or provider behaviour.",
+            )
+        manifest["model_assessment"] = assessment
         path = self.root / f"{name}.json"
         path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         return path
@@ -109,6 +143,8 @@ class RingerCliTests(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["RINGER_NO_SELF_UPDATE"] = "1"
+        env["RINGER_NO_CATALOG_REFRESH"] = "1"
+        env["RINGER_HOME"] = str(self.root / "ringer-home")
         return subprocess.run(
             cmd,
             cwd=ROOT,
@@ -268,6 +304,7 @@ class RingerCliTests(unittest.TestCase):
                     "key": "timeout",
                     "engine": "sleep_then_write",
                     "spec": "Sleep too long.",
+                    "retry_policy": "legacy",
                     "expect_files": ["out.txt"],
                     "timeout_s": 1,
                     "check": 'test "$(cat out.txt 2>/dev/null)" = done',
@@ -313,6 +350,8 @@ class RingerCliTests(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["RINGER_NO_SELF_UPDATE"] = "1"
+        env["RINGER_NO_CATALOG_REFRESH"] = "1"
+        env["RINGER_HOME"] = str(self.root / "ringer-home")
         proc = subprocess.Popen(
             cmd,
             cwd=ROOT,
@@ -341,7 +380,7 @@ class RingerCliTests(unittest.TestCase):
         self.assertTrue(state["finished"])
         self.assertEqual(state["state"], "finished")
         self.assertEqual(state["summary"]["fail"], 1)
-        self.assertEqual(state["tasks"][0]["status"], "fail")
+        self.assertEqual(state["tasks"][0]["status"], "interrupted")
 
     def test_second_signal_during_shutdown_does_not_cancel_cleanup(self) -> None:
         manifest = self.write_manifest(
@@ -373,6 +412,8 @@ class RingerCliTests(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["RINGER_NO_SELF_UPDATE"] = "1"
+        env["RINGER_NO_CATALOG_REFRESH"] = "1"
+        env["RINGER_HOME"] = str(self.root / "ringer-home")
         proc = subprocess.Popen(
             cmd,
             cwd=ROOT,
@@ -406,7 +447,7 @@ class RingerCliTests(unittest.TestCase):
         state = self.read_final_state()
         self.assertTrue(state["finished"])
         self.assertEqual(state["state"], "finished")
-        self.assertEqual(state["tasks"][0]["status"], "fail")
+        self.assertEqual(state["tasks"][0]["status"], "interrupted")
 
     def test_custom_shell_engine_substitutes_spec_placeholder(self) -> None:
         manifest = self.write_manifest(
@@ -499,7 +540,7 @@ class RingerCliTests(unittest.TestCase):
         self.assertTrue((workdir / "logs" / "wt-pass.worker.log").is_file())
         self.assertEqual([row["verdict"] for row in self.read_rows()], ["PASS"])
 
-    def test_worktree_prepare_failure_logs_error_row(self) -> None:
+    def test_worktree_prepare_failure_logs_blocked_without_attempt(self) -> None:
         repo = self.root / "repo-prepare"
         repo.mkdir()
         subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -547,8 +588,11 @@ class RingerCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         rows = self.read_rows()
-        self.assertEqual(rows[0]["verdict"], "ERROR")
-        self.assertIn("taskdir already exists but is not a registered git worktree", rows[0]["notes"])
+        self.assertEqual([], rows)
+        state = self.read_final_state()
+        self.assertEqual("blocked", state["tasks"][0]["status"])
+        self.assertEqual(0, state["tasks"][0]["attempts"])
+        self.assertIn("taskdir already exists but is not a registered git worktree", state["tasks"][0]["setup_error"])
 
     def test_task_key_cannot_escape_workdir(self) -> None:
         manifest = self.write_manifest(

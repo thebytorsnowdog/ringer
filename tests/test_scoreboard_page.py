@@ -55,6 +55,7 @@ def attempt(
 ) -> dict[str, object]:
     return {
         "run_id": run_id,
+        "run_name": run_id,
         "task_key": task_key,
         "worker_engine": engine,
         "model": model,
@@ -104,10 +105,10 @@ class ScoreboardPageTests(unittest.TestCase):
 
     def write_fixtures(self) -> None:
         rows: list[dict[str, object]] = []
-        for index in range(20):
+        for index in range(30):
             run_id = f"proven-{index:02d}"
             task_key = "task"
-            if index < 18:
+            if index < 27:
                 rows.append(
                     attempt(
                         run_id=run_id,
@@ -284,7 +285,7 @@ class ScoreboardPageTests(unittest.TestCase):
         self.assertIn("quarantined legacy data", html)
         self.assertIn('<span class="tier-badge proven">proven</span>', html)
         self.assertIn('<span class="tier-badge probation">probation</span>', html)
-        self.assertIn("n=20", html)
+        self.assertIn("n=30", html)
         self.assertIn('class="rate-bar bar-fill" style="width: 90%"', html)
         self.assertIn('class="rate-bar bar-fill" style="width: 100%"', html)
         self.assertIn('<td class="num">2,000</td>', html)
@@ -325,7 +326,7 @@ class ScoreboardPageTests(unittest.TestCase):
 
         footer_start = html.index('<footer class="scoreboard-footer">')
         footer_html = html[footer_start:]
-        self.assertIn("25 rows read, 1 skipped lines.", footer_html)
+        self.assertIn("36 rows read, 1 skipped lines.", footer_html)
         self.assertIn("Ordering sorts by evidence tier first", footer_html)
         self.assertIn("Misrouted and unattributed legacy rows are not ranked or tiered", footer_html)
 
@@ -368,11 +369,10 @@ class ScoreboardPageTests(unittest.TestCase):
 
         html = self.render_to(self.root / "scoreboard.html")
 
-        self.assertLess(html.index(">Proven<"), html.index(">Probation<"))
         self.assertIn("n=20", html)
         row_start = html.rfind('<tr class="model-row"', 0, html.index(">Proven<"))
         row_end = html.index("</tr>", row_start)
-        self.assertIn('<span class="tier-badge proven">proven</span>', html[row_start:row_end])
+        self.assertIn('<span class="tier-badge probation">probation</span>', html[row_start:row_end])
 
     def test_html_path_does_not_write_artifact_library(self) -> None:
         html_path = self.root / "custom.html"

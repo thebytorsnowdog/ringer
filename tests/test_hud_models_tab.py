@@ -103,7 +103,7 @@ class HudModelsTabTests(unittest.TestCase):
         rollup = payload["rollup"][0]
         self.assertEqual("openrouter/acme/small", rollup["model"])
         self.assertEqual("Small", rollup["model_display"])
-        self.assertEqual("proven", rollup["tier"])
+        self.assertEqual("probation", rollup["tier"])
         self.assertEqual(3, rollup["tasks"])
         self.assertEqual(4, rollup["attempts"])
         self.assertEqual(1.0, rollup["pass_rate"])

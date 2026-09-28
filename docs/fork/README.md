@@ -19,6 +19,7 @@ and stays level with it.
 | `feat/fork-setup` | This guide, the README notes, `scripts/fork/update-ian.sh`, the weekly workflow | Fork only |
 | `feat/opencode-writable-root` | Repeatable `--writable-root PATH` for the sandboxed OpenCode wrapper; `repo-feature` uses it | Candidate PR |
 | `feat/glm-5.3-flash` | GLM 5.3 Flash capability card and model identity | Candidate PR |
+| `feat/openrouter-models` | Model identities for DeepSeek V4.1 Flash and MiMo V2.5 (on probation; see docs/MODEL-ROUTING.md) | Candidate PR |
 | `feat/codex-integration` | `install-agent --codex`, a Codex-host skill, Codex tool names in the nudge hook | Candidate PR |
 | `feat/cost-engine` | Cost accounting, optional billing admission, reliability evidence, model-fit assessment (`ringer.py assess`, opt-in gate), `ringer.py outcomes`, benchmarks | Ask upstream first |
 | `feat/discovery` | `ringer-discover.py` automation discovery companion (builds on `feat/cost-engine`) | Fork only |

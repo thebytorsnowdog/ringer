@@ -25,6 +25,8 @@ and stays level with it.
 | `feat/discovery` | `ringer-discover.py` automation discovery companion (builds on `feat/cost-engine`) | Fork only |
 | `feat/mission-fit` | `AGENTS.md` mission contract and `scripts/check_mission_fit_gate.py` | Fork only |
 | `feat/pstack-ringer-defaults` | `pstack-ringer-defaults` skill, the single source that harness skill dirs symlink to | Fork only |
+| `feat/subscription-routing` | Subscription-first routing, bound model-fit assessment, `scripts/assess_openrouter.py` | Fork only |
+| `feat/host-neutral-coordinator` | Any host coordinates (Antigravity by default); Codex is a worker only | Fork only |
 
 ## Staying level with upstream
 

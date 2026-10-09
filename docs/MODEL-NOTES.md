@@ -236,6 +236,7 @@ checks and raw logs support — no vibes, no worker self-reports.
   the CHECK exceeded the default 60s check timeout, not the worker (the
   manifest should have set `check_timeout_s`). Clean,
   minimal diff that stayed inside the owned files. Probation for code-feature.
+- 2026-10-09 — code-feature (antigravity nudge hook, run rules-owner-followups): FAILED (Ringer timeout). The worker generated no files after 40 minutes, likely hanging on generation under `reasoning-effort high`, so I terminated it and reassigned the task.
 
 ## claude opus (Claude Code CLI 2.1.293, claude.ai subscription, bwrap on Linux)
 
@@ -246,6 +247,7 @@ checks and raw logs support — no vibes, no worker self-reports.
   real `~/.claude/.credentials.json`; the host login stayed valid. Never pass
   `--bare` (forces ANTHROPIC_API_KEY auth).
 
+- 2026-10-09 — code-feature (antigravity nudge hook, run rules-owner-followups): PASS attempt 1 (95s, ~200k tokens). Follow-up to the hung Grok attempt above. Passed exactly the same specification and behavioural tests.
 ## Process lessons (cross-model)
 
 - 2026-10-09 — Checks default to a 60s timeout. A check that runs a

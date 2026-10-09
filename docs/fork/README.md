@@ -27,6 +27,8 @@ and stays level with it.
 | `feat/pstack-ringer-defaults` | `pstack-ringer-defaults` skill, the single source that harness skill dirs symlink to | Fork only |
 | `feat/subscription-routing` | Subscription-first routing, bound model-fit assessment, `scripts/assess_openrouter.py` | Fork only |
 | `feat/host-neutral-coordinator` | Any host coordinates (Antigravity by default); Codex is a worker only | Fork only |
+| `feat/engine-effort-flag` | Optional engine `effort_flag` so CLIs like Claude Code (`--effort`) pass the model-fit gate | Candidate PR |
+| `feat/subscription-workers` | Model notes for the Claude and Grok subscription workers; check-timeout lesson | Fork only |
 
 ## Staying level with upstream
 

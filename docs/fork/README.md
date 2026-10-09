@@ -24,6 +24,7 @@ and stays level with it.
 | `feat/cost-engine` | Cost accounting, optional billing admission, reliability evidence, model-fit assessment (`ringer.py assess`, opt-in gate), `ringer.py outcomes`, benchmarks | Ask upstream first |
 | `feat/discovery` | `ringer-discover.py` automation discovery companion (builds on `feat/cost-engine`) | Fork only |
 | `feat/mission-fit` | `AGENTS.md` mission contract and `scripts/check_mission_fit_gate.py` | Fork only |
+| `feat/pstack-ringer-defaults` | `pstack-ringer-defaults` skill, the single source that harness skill dirs symlink to | Fork only |
 
 ## Staying level with upstream
 

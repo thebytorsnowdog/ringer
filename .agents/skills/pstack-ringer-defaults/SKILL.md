@@ -61,7 +61,7 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
 |---|---|---|
 | Claude Code | Native `/pstack:*` | `~/.claude/skills/ringer` plus hooks |
 | Codex | Worker only (no longer a coordinator) | worker engine `codex` |
-| Antigravity (primary, rules owner) | Read the leaf files. Panels run as Ringer `adversarial-review` (pstack's launcher needs `bun`, not installed). | `~/.agents/skills/ringer` via shell |
+| Antigravity (primary, rules owner) | Read the leaf files. Panels run as Ringer `adversarial-review` (pstack's launcher needs `bun`, not installed). | `~/.agents/skills/ringer` via shell plus `ringer_nudge_antigravity.py` hook |
 | Hermes | `pstack-*` subset installed; read missing ones from the leaf files | via shell |
 | Grok | Panelist or worker only; cannot host pstack | worker only |
 | OpenCode | Worker harness; follows its spec, not these rules | n/a |

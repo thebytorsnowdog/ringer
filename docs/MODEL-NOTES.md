@@ -223,8 +223,35 @@ checks and raw logs support — no vibes, no worker self-reports.
   watch retry counts before scaling them into a batch (2026-07-05 focus
   group lesson).
 
+## grok-4.7 (Grok Build CLI 1.0.50, grok.com subscription, bwrap on Linux)
+
+- 2026-10-09 — probe (exact-byte file write): PASS first try, 10.8s, ~47k
+  tokens. CLI reports the resolved model as `grok-4.7-build`. Its JSON
+  `total_cost_usd` is a notional figure; auth was grok.com OAuth with API-key
+  env vars unset (inferred subscription, not provider-verified).
+- 2026-10-09 — code-feature (`effort_flag` in ringer.py + 6 tests, run
+  engine-effort-flag): substance correct on attempt 1 (independent check:
+  behavioural asserts, new tests, full suite 544 OK), ~24 min, 22 model
+  calls, ~1.3M tokens mostly cache reads. Ringer recorded TIMEOUT because
+  the CHECK exceeded the fixed 60s check timeout, not the worker. Clean,
+  minimal diff that stayed inside the owned files. Probation for code-feature.
+
+## claude opus (Claude Code CLI 2.1.293, claude.ai subscription, bwrap on Linux)
+
+- 2026-10-09 — probe (exact-byte file write): PASS first try, 9.0s. Raw
+  stream-json init shows `apiKeySource: none` (OAuth subscription) and model
+  `claude-opus-5-5`; `--effort low` forwarded via the new `effort_flag`.
+  Token refresh through the single-file credential bind wrote back to the
+  real `~/.claude/.credentials.json`; the host login stayed valid. Never pass
+  `--bare` (forces ANTHROPIC_API_KEY auth).
+
 ## Process lessons (cross-model)
 
+- 2026-10-09 — The check timeout is a fixed 60s (`CHECK_TIMEOUT_S`) and is
+  not a manifest field. A check that runs a multi-minute suite will report
+  TIMEOUT against a correct worker. Keep executed checks to targeted tests
+  and behavioural asserts; run the full suite as the coordinator's
+  integration gate.
 - 2026-07-06 — the orchestrator's CHECKS were the day's top failure source:
   three check bugs (fixture newline join, first-occurrence ordering vs the
   watchlist strip, claim-prefix split on '.' instead of ':') each produced

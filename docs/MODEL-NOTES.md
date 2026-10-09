@@ -233,7 +233,8 @@ checks and raw logs support — no vibes, no worker self-reports.
   engine-effort-flag): substance correct on attempt 1 (independent check:
   behavioural asserts, new tests, full suite 544 OK), ~24 min, 22 model
   calls, ~1.3M tokens mostly cache reads. Ringer recorded TIMEOUT because
-  the CHECK exceeded the fixed 60s check timeout, not the worker. Clean,
+  the CHECK exceeded the default 60s check timeout, not the worker (the
+  manifest should have set `check_timeout_s`). Clean,
   minimal diff that stayed inside the owned files. Probation for code-feature.
 
 ## claude opus (Claude Code CLI 2.1.293, claude.ai subscription, bwrap on Linux)
@@ -247,11 +248,12 @@ checks and raw logs support — no vibes, no worker self-reports.
 
 ## Process lessons (cross-model)
 
-- 2026-10-09 — The check timeout is a fixed 60s (`CHECK_TIMEOUT_S`) and is
-  not a manifest field. A check that runs a multi-minute suite will report
-  TIMEOUT against a correct worker. Keep executed checks to targeted tests
-  and behavioural asserts; run the full suite as the coordinator's
-  integration gate.
+- 2026-10-09 — Checks default to a 60s timeout. A check that runs a
+  multi-minute suite reports TIMEOUT against a correct worker unless the task
+  sets `check_timeout_s` (finite positive seconds; see docs/RELIABILITY.md).
+  Prefer targeted tests and behavioural asserts in the check, and run the full
+  suite as the coordinator's integration gate. (Corrects an earlier same-day
+  note that called the timeout fixed; a `--baseline` run exposed it.)
 - 2026-07-06 — the orchestrator's CHECKS were the day's top failure source:
   three check bugs (fixture newline join, first-occurrence ordering vs the
   watchlist strip, claim-prefix split on '.' instead of ':') each produced

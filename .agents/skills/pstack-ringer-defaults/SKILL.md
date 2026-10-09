@@ -47,7 +47,7 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
 ## 4. Always
 
 1. Only executed checks and direct read-back count. Worker claims and file existence do not. Coordinator review precedes integration.
-2. Checks print why they fail and can never be `true`. New-behaviour checks FAIL at baseline; unchanged-behaviour checks PASS. Checks have a fixed 60s timeout, so keep them to targeted tests and behavioural asserts. Run the full suite yourself as the integration gate.
+2. Checks print why they fail and can never be `true`. New-behaviour checks FAIL at baseline; unchanged-behaviour checks PASS. Checks time out after 60s unless the task sets `check_timeout_s`. Prefer targeted tests and behavioural asserts, and run the full suite yourself as the integration gate.
 3. Every writer gets its own worktree or output dir. Export deliverables out of worktrees before PASS. Preserve sandbox and source/receipt integrity.
 4. Review every patch even when green. Stage specific paths; never `git add -A` in a shared checkout.
 5. One job, one `run_name`. Review on Ringside, not by `cat`-ing results.

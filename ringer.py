@@ -761,6 +761,7 @@ class EngineConfig:
     # its own "model" — this is what makes a harness engine (OpenCode) model
     # agnostic instead of hard-coding one model into the command line.
     model_default: str = ""
+    effort_flag: str = ""
 
     @property
     def process_name(self) -> str:
@@ -1730,6 +1731,9 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
         model_default = str(
             section.get("model_default", base.model_default if base else "")
         ).strip()
+        effort_flag = str(
+            section.get("effort_flag", base.effort_flag if base else "")
+        ).strip()
         engines[clean_name] = EngineConfig(
             name=clean_name,
             bin=bin_path,
@@ -1739,6 +1743,7 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
             token_regex=token_regex,
             model_report_regex=model_report_regex,
             model_default=model_default,
+            effort_flag=effort_flag,
         )
     return engines
 
@@ -10168,11 +10173,13 @@ def _config_values_from_command(command: list[str], key: str) -> list[str]:
 def _effort_values_from_command(command: list[str]) -> list[str]:
     values = _config_values_from_command(command, "model_reasoning_effort")
     for index, item in enumerate(command):
-        if item in {"--variant", "--reasoning-effort"}:
+        if item in {"--variant", "--reasoning-effort", "--effort"}:
             values.append(command[index + 1] if index + 1 < len(command) else "")
         elif item.startswith("--variant="):
             values.append(item.partition("=")[2])
         elif item.startswith("--reasoning-effort="):
+            values.append(item.partition("=")[2])
+        elif item.startswith("--effort="):
             values.append(item.partition("=")[2])
     return values
 
@@ -10379,11 +10386,17 @@ def build_worker_command(
     resolved_model = model or engine.model_default
     assessed_args: tuple[str, ...] = ()
     joined_engine_args = "\n".join(engine_args)
+    effort_flag = engine.effort_flag
     has_effort_override = (
         "model_reasoning_effort" in joined_engine_args
         or "--variant" in engine_args
         or "--reasoning-effort" in engine_args
-        or any(arg.startswith(("--variant=", "--reasoning-effort=")) for arg in engine_args)
+        or (bool(effort_flag) and effort_flag in engine_args)
+        or any(
+            arg.startswith(("--variant=", "--reasoning-effort="))
+            or (bool(effort_flag) and arg.startswith(f"{effort_flag}="))
+            for arg in engine_args
+        )
     )
     has_service_override = (
         "service_tier" in joined_engine_args
@@ -10394,6 +10407,8 @@ def build_worker_command(
     if reasoning_effort and not has_effort_override:
         if engine.name == DEFAULT_ENGINE_NAME:
             assessed_args += ("-c", f"model_reasoning_effort={reasoning_effort}")
+        elif effort_flag:
+            assessed_args += (effort_flag, reasoning_effort)
         else:
             assessed_args += ("--variant", reasoning_effort)
     if service_tier and engine.name == DEFAULT_ENGINE_NAME and not has_service_override:

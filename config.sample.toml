@@ -99,6 +99,8 @@ bin = "codex"
 #   inserts the assessed effort and service setting here. Keep this placeholder
 #   or the pre-dispatch gate cannot prove that the command forwards the route.
 #   Do not put model, effort or service overrides in task engine_args.
+# effort_flag names the CLI flag that receives the assessed reasoning effort
+# (default: --variant for non-codex engines; Claude Code uses --effort).
 args_template = [
   "exec",
   "--json",

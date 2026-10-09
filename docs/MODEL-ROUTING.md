@@ -13,6 +13,29 @@ Unnamed, custom or apparently non-model wrappers must be assessed, or the job
 stops. Historical manifests remain readable, but they need a fresh assessment
 before a new execution; historical data reads are unaffected.
 
+## Automatic use and subscription routing
+
+Use Ringer whenever the workflow benefits from it, without asking permission
+or requiring model-selection confirmation. Current Codex remains coordinator
+for specs, checks, routing and review; Codex subscription workers are allowed.
+For complicated tasks prioritise suitable already-authenticated subscription
+models through their native configured harness. Read local configuration and
+observed auth/quota, then choose the exact locally available model and supported
+effort per task. Record explicit `billing_route: subscription` and
+`service_tier: standard` for subscription tasks.
+
+Choices within existing authority are coordinator decisions. Ask only for
+genuinely missing authority. Preserve executable checks, sandbox confinement,
+source integrity, raw logs and artifact-bound human review receipts. Model-fit
+assessment is required before dispatch; assessment is NOT user approval.
+No silent paid API or Fast fallback, top-up, credential change or budget-cap
+change is authorised by this policy. Honour an explicit inline request;
+otherwise a single delegated task is a one-task manifest.
+
+This policy supersedes historical OpenRouter-first/OpenCode-only routing,
+no-Codex-worker rules and job-specific subscription restrictions. Historical
+model notes remain evidence of their original runs, not current routing orders.
+
 ## Required workflow
 
 1. Write the task specification and executable check. Assess complexity and
@@ -108,15 +131,47 @@ An authorised Astra subscription selection still depends on observed ChatGPT
 authentication and quota at each run. Use standard service and record the
 selected effort explicitly, so a host's high effort is not inherited. There
 is no automatic paid fallback or top-up. Current API caps are £0, alongside
-the shared £90 subscription fee. Ian has authorised Astra subscription fit
-assessment for this work, not a global model change. If access, authority or
-evidence is missing, stop with `BLOCKED`. Assignments remain provisional.
+the shared £90 subscription fee. The earlier job-specific Astra subscription
+fit-assessment permission is historical and superseded by the subscription
+priority above. If access, authority or evidence is missing, stop with
+`BLOCKED`. Assignments remain provisional.
 
-## OpenRouter probation policy (17 September 2026)
+## OpenRouter evidence before selection
+
+For OpenRouter candidates review the current catalog and task-family evidence.
+If capability assessment is missing or older than 24 hours, refresh it before
+selection:
+
+```bash
+python3 scripts/assess_openrouter.py --refresh --out ~/.ringer/model-assessment
+```
+
+See [model evaluation](MODEL-EVALUATION.md). Automatic weekly catalog-only
+refresh uses zero inference: it does not run probes, authorise API spending or
+replace capability assessment before selection. Catalog compatibility does not
+prove best quality. If refresh or relevant evidence is unavailable, do not
+silently select a stale candidate. Use `engine: opencode` and an explicit
+current `model: openrouter/<exact-model-slug>` after review; no implicit default
+or model override hidden in engine arguments. Paid candidates still need
+existing API authority and unchanged caps.
+
+Exploration is optional when useful to the job within existing authority;
+there is no compulsory exploration slot or user model-selection confirmation.
+The evidence floor is 30 distinct jobs in the same named task family, at least
+75% first-try and 85% final-check pass rates. Repeated rounds of one job, mixed
+families, mismatched identities and unattributed rows do not meet the floor.
+Keep a stable `job_id` and inspect per-family `routing_evidence`. A statistical
+label is separate from human quality review; global promotion still needs human
+review, and a worker cannot create its own approval receipt.
+
+## Historical OpenRouter probation policy (17 September 2026)
 
 Use deterministic tools first. The current GPT-6 Codex model remains the
 coordinator/reviewer. These restrictions govern OpenRouter exploration and
-implementation; they do not activate a global route.
+implementation; they do not activate a global route. Subscription priority
+supersedes the former OpenRouter-first preference. Retain these historical
+reliability restrictions unless fresh assessment and executed evidence justify
+a change within existing authority.
 
 - MiMo uses `engine: opencode` and exact model `openrouter/xiaomi/mimo-v2.5`
   only for small isolated implementation with a strong executable check.
@@ -129,7 +184,8 @@ implementation; they do not activate a global route.
 
 No automatic fallback or top-up. Route changes require fresh assessment.
 None of these models is globally promoted until there are 30 distinct real
-jobs in a task family plus human review. Existing API authority and budget
+jobs in a task family, 75% first-try and 85% final-check pass rates, plus
+human review before global promotion. Existing API authority and budget
 limits still apply.
 
 ## Evidence retained

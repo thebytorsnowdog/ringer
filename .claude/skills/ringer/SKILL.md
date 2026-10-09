@@ -5,6 +5,8 @@ description: >-
   smoke tests, simulations, graders, persona harnesses or CLI agents;
   edit-test-edit loops or batches of edits; reviews of failed worker output;
   manifest writing, model-fit assessment, engine selection or run diagnosis.
+  Use Ringer automatically when beneficial; prioritise suitable authenticated
+  subscription models through their native configured harness for complicated work.
   Assess model fit before dispatch, then delegate implementation with an
   executable check. A single task is a one-task manifest; bounded read-only
   questions use ringer.py ask. Skip read-only file search, git operations,
@@ -52,8 +54,8 @@ review.
 ```bash
 ./ringer.py assess manifest.json --output assessed.json
 ./ringer.py lint assessed.json            # always lint before running
-./ringer.py run manifest.json --identity <who-you-are>
-./ringer.py run manifest.json --dry-run   # print the plan, spawn nothing
+./ringer.py run assessed.json --identity <who-you-are>
+./ringer.py run assessed.json --dry-run   # print the plan, spawn nothing
 ```
 
 Runs land in `~/.ringer/runs/`. Raw worker logs land in `<workdir>/logs/`.
@@ -61,6 +63,29 @@ Full reference: `README.md`. Ready-made manifest skeletons: `templates/`.
 Lint catches unverifiable checks, silent checks, worktree deliverable/commit
 loss, serial fan-out, write collisions, and underspecified specs; `run`
 prints the same findings as non-blocking warnings.
+
+## Automatic use and subscription routing
+
+Use Ringer whenever the workflow benefits from it, without asking permission
+or requiring model-selection confirmation. Current Codex remains coordinator
+for specs, checks, routing and review; Codex subscription workers are allowed.
+For complicated tasks prioritise suitable already-authenticated subscription
+models through their native configured harness. Read local configuration and
+observed auth/quota, then choose the exact locally available model and supported
+effort per task. Record explicit `billing_route: subscription` and
+`service_tier: standard` for subscription tasks.
+
+Choices within existing authority are coordinator decisions. Ask only for
+genuinely missing authority. Preserve executable checks, sandbox confinement,
+source integrity, raw logs and artifact-bound human review receipts. Model-fit
+assessment is required before dispatch; assessment is NOT user approval.
+No silent paid API or Fast fallback, top-up, credential change or budget-cap
+change is authorised by this policy. Honour an explicit inline request;
+otherwise a single delegated task is a one-task manifest.
+
+This policy supersedes historical OpenRouter-first/OpenCode-only routing,
+no-Codex-worker rules and job-specific subscription restrictions. Historical
+model notes remain evidence of their original runs, not current routing orders.
 
 ## Assess model fit before work
 
@@ -105,9 +130,10 @@ the default and a host's high effort is never inherited. Fast requires existing
 explicit paid authority and is never inferred from effort. Require observed
 ChatGPT authentication and quota for subscription routes. There is no
 automatic paid fallback or top-up; current API caps are £0 alongside the
-shared £90 subscription fee. Astra subscription fit assessment is authorised
-for this work, not a global model change. Never auto-route or fall back to
-another route.
+shared £90 subscription fee. The earlier job-specific Astra subscription
+restriction is historical and superseded by the policy above; it was not a
+global promotion. Select an exact locally available model and effort per task. Never silently fall back to
+another model, billing route or service tier, or change budget caps.
 
 ## Bounded read-only questions: `ask`
 
@@ -273,11 +299,14 @@ Pattern-selection judgment:
   read-only scout task. If it calls a model, it runs under Ringer — that is
   what makes it visible, verified, and logged.
 
-## OpenRouter probation policy (17 September 2026)
+## Historical OpenRouter probation policy (17 September 2026)
 
 Use deterministic tools first. The current GPT-6 Codex model remains the
 coordinator/reviewer. These restrictions govern OpenRouter exploration and
-implementation; they do not activate a global route.
+implementation; they do not activate a global route. Subscription priority
+supersedes the former OpenRouter-first preference. Retain these historical
+reliability restrictions unless fresh assessment and executed evidence justify
+a change within existing authority.
 
 - MiMo uses `engine: opencode` and exact model `openrouter/xiaomi/mimo-v2.5`
   only for small isolated implementation with a strong executable check.
@@ -290,67 +319,63 @@ implementation; they do not activate a global route.
 
 No automatic fallback or top-up. Route changes require fresh assessment.
 None of these models is globally promoted until there are 30 distinct real
-jobs in a task family plus human review. Existing API authority and budget
+jobs in a task family, 75% first-try and 85% final-check pass rates, plus
+human review before global promotion. Existing API authority and budget
 limits still apply.
 
 ## Engine selection
 
-**The engine choice belongs to the human — but the recommendation comes
-from THEIR evidence.** Before the FIRST run of a job: read what's wired up
-(`[engines.<name>]` blocks in `~/.config/ringer/config.toml`), run
-`./ringer.py models --task-type <this job's type>` for the local scoreboard,
-and glance at `./ringer.py catalog --changes` for anything newly free or
-newly cheap. Then ask the user which model should do the typing — top 2–3
-options with the NUMBERS in the pitch and a recommendation, e.g.: *"GLM is
-6/6 first-try on persona work here at ~2¢/task — recommended. Codex is also
-100% but ~8x the tokens. And kimi went free on OpenRouter yesterday — want
-it auditioning one of the small tasks?"* Honor their pick via the per-task
-`engine`/`model` fields; don't re-ask every round of the same job unless
-the mix isn't working. This is per-user by design: the scoreboard learns
-THIS user's workload — never import another machine's conclusions or
-recommend from a different user's numbers.
+**The coordinator chooses within existing authority.** Before dispatch read
+configured engines in `~/.config/ringer/config.toml`, observed auth/quota,
+`./ringer.py models --task-type <type>` and `docs/MODEL-NOTES.md`. Prioritise
+suitable subscription models for complicated work through their native
+configured harness, including Codex workers. Name exact model, effort, billing
+and service in each task and bound assessment. Inspect lint and dry-run output
+to confirm the resolved command. A route that cannot prove it preserves selected
+identity, access, sandbox and checks is blocked. No model-selection confirmation
+is required for choices within existing authority.
 
-**Explore or the scoreboard fossilizes.** Always recommending the proven
-pick means never learning a new one. In any run of 3+ tasks that has a
-low-stakes lane (docs sweeps, mechanical edits, persona reviews — strong
-executed check, retry to absorb failure), assign roughly ONE task to an
-exploration candidate from `./ringer.py models --explore --task-type <type>`
-(untested + cheap or free, text-capable, decent context). Free promos from
-`catalog --changes` jump the queue — a temporarily-free model is a zero-cost
-experiment. Never explore on time-critical work, never with more than a
-small slice of a batch, and name the experiment when presenting the engine
-ask so the human can veto it. Promotion ladder (computed by --explore):
-untested → probation → proven requires at least 30 distinct jobs in the same
-named task family, first-try pass rate ≥75% and final-check pass rate ≥85%.
-Mixed families, repeated rounds of one job, identity mismatches and unattributed
-rows cannot meet the floor. A first 20-case microbenchmark is preliminary.
-This is a statistical label, separate from human quality and promotion. Keep a
-stable job_id across rounds and inspect the per-family routing_evidence.
+**OpenRouter candidates require fresh evidence.** Review current catalog and
+per-task-family evidence before selection. If capability assessment is missing
+or older than 24 hours, refresh it before selecting an OpenRouter candidate:
 
-**OpenCode is the harness; the model is a manifest field.** Unless a model
-ships its own first-class harness (Codex does), it runs through the
-`opencode` engine with the task's `"model"` field set to the OpenRouter
-slug — e.g. `"engine": "opencode", "model": "openrouter/moonshotai/kimi-k2.7-code"`.
-This holds even when someone — including the user, in the heat of a run —
-says to "call kimi directly" or reach for the model's own CLI: the harness
-is what provides the sandbox, raw logs, token counts, and executed
-verification, so routing around it silently drops all four. Never clone an
-engine block or splice `-m` through `engine_args` to change models; that's
-what the `model` field is for, and a bakeoff is only real when the MANIFEST
-names each competitor (2026-07-06 lesson: an engine block with a hard-coded
-model ran one model under three competitors' names).
+```bash
+python3 scripts/assess_openrouter.py --refresh --out ~/.ringer/model-assessment
+```
 
-Engines are config blocks (`[engines.<name>]` in config.toml), selectable
-per task via the manifest `engine` field. Defaults are deliberate:
+Read [model evaluation](../../../docs/MODEL-EVALUATION.md) and
+[model routing](../../../docs/MODEL-ROUTING.md). Automatic weekly catalog-only
+refresh uses zero inference; it does not run probes or benchmarks, authorise
+API spending or replace pre-selection capability assessment. Catalog
+compatibility does not prove best quality. If refresh or relevant evidence is
+unavailable, do not silently select a stale candidate.
 
-- **codex** (public default): choose a model from the user's local evidence.
-  Use per-task `engine_args`
-  to set reasoning effort — spend it on hard tasks, not boilerplate.
-- **opencode**: the universal lane — any OpenRouter model via the `model`
-  field. Keep `model_default` empty and select an explicit assessed route
-  under the probation policy above.
-  Validate a model new to you with a trivial one-task manifest before
-  trusting it with a batch.
+For OpenRouter candidates use `"engine": "opencode"` and an explicit current
+`"model": "openrouter/<exact-model-slug>"`; never rely on a default, clone an
+engine block or splice `-m` into `engine_args` to change models. The native
+subscription harness remains the priority for suitable complicated work;
+OpenCode is the configured OpenRouter harness, not a universal worker mandate.
+Paid API candidates still require existing spending authority and unchanged
+caps; no free promotion or catalog refresh grants paid authority.
+
+**Exploration is optional.** Use `models --explore --task-type <type>` as a
+candidate list when an experiment benefits the job, fits existing authority
+and has a strong check. Do not force an exploration task into every batch.
+A cheap/free listing or trivial smoke is not quality evidence for heavy work.
+
+The evidence floor for a proven task-family label is at least **30 distinct
+jobs**, **75% first-try pass rate** and **85% final-check pass rate** in the same
+named family. Repeated rounds of one job, mixed families, identity mismatches
+and unattributed rows cannot meet the floor. Keep a stable `job_id` across
+rounds and inspect per-family `routing_evidence`. A first 20-case microbenchmark
+is preliminary. Human review is still required before global promotion;
+a statistical label or passing check never creates that receipt.
+
+Engines are configured blocks selected per task via `engine`. Choose native
+subscription routes with explicit model/effort and standard service; unsupported
+or unauthenticated routes block rather than falling back. OpenRouter routes
+use the explicit assessed OpenCode slug and applicable reliability limits.
+
 - Small/flash-class models are the first to choke on long conversational or
   multi-turn harness tasks — watch their retry counts before scaling them.
 - Match `timeout_s` to the task: conversational harness tasks and

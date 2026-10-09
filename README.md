@@ -4,11 +4,11 @@
 
 ![Ringer — she reviews; the wall works](docs/hero.png)
 
-**Parallel AI-agent swarms that prove their work. Your expensive model plans and reviews; cheap workers do the typing.**
+**Parallel AI-agent swarms that prove their work. The coordinator plans and reviews; suitable workers do the implementation.**
 
 Frontier models are finally good enough to trust with real implementation — but their tokens are priced like senior-engineer hours, and most of a build is not senior-engineer work. It's scaffolding, migrations, test suites, batch transforms. Mechanical labor.
 
-So split the roles. Your best model writes the specs and reviews the results. A swarm of cheap workers — Codex, Grok, anything with a CLI — does the implementation in parallel. Your premium budget stops scaling with lines of code written and starts scaling with decisions made.
+Split the roles: the coordinator writes specs and checks, chooses the route and reviews results. Suitable workers implement in parallel. For complicated work, prioritise already-authenticated subscription models through their native configured harness, including Codex subscription workers; exact model and effort are chosen per task.
 
 One problem: parallel agents lie. "Done" doesn't mean working. Ringer doesn't take the worker's word for anything — it **executes your check command** against the artifact. Pass or fail is decided by running the code, not by reading the agent's summary. Failures retry once with the failure context injected, and every attempt is logged so your setup gets measurably better over time.
 
@@ -54,18 +54,23 @@ mkdir -p ~/.config/ringer && cp config.sample.toml ~/.config/ringer/config.toml 
 ./ringer.py install-agent
 ```
 
-4. Run the demo:
+4. Assess and preview the demo before dispatch:
 
 ```bash
-./ringer.py demo                                      # 3 real workers, verified end to end
+./ringer.py demo --dry-run                           # zero-model assessment draft
+# Save and fill every judgement field, then run demo with --assessment PATH.
 ```
 
-The demo spawns three Codex workers in parallel, verifies each artifact by executing it, and prints a verdict table — and Ringside, the live dashboard, opens in your browser on its own. If all three say PASS, that's the whole setup.
+The demo spawns three Codex workers in parallel, verifies each artifact by executing it, and prints a verdict table — and Ringside, the live dashboard, opens in your browser on its own. Passing executed checks establish product state; coordinator review is still required, and no human promotion is implied.
 
-Run your own batch:
+Draft your own batch (replace the model placeholder with an exact locally available subscription model before assessment):
 
 ```bash
-./ringer.py run swarm.json --max-parallel 4
+./ringer.py assess swarm.json --coordinator codex-orchestrator --output assessed.json
+# Fill every judgement field; select an exact locally available model and effort.
+./ringer.py lint assessed.json
+./ringer.py run assessed.json --dry-run
+./ringer.py run assessed.json --max-parallel 4
 ```
 
 ```json
@@ -76,6 +81,11 @@ Run your own batch:
   "tasks": [
     {
       "key": "alpha",
+      "engine": "codex",
+      "model": "REPLACE_WITH_LOCAL_MODEL",
+      "billing_route": "subscription",
+      "task_type": "docs",
+      "engine_args": ["-c", "model_reasoning_effort=low", "-c", "service_tier=default"],
       "spec": "Create alpha.txt containing exactly one line: alpha ready\nEnd the file with exactly one newline. Do not add punctuation.",
       "check": "printf 'alpha ready\\n' | diff -u - alpha.txt || { echo 'FAIL: alpha.txt must contain exactly alpha ready followed by one newline'; exit 1; }",
       "expect_files": ["alpha.txt"]
@@ -103,7 +113,8 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 | `check` | Shell command run after the worker exits; exit 0 = PASS |
 | `expect_files` | Files that must exist and be non-empty before the check runs |
 | `engine` | Which configured engine runs this task (default `codex`) |
-| `model` | Which model a harness engine runs for this task — fills the engine's `{model}` placeholder (e.g. `"openrouter/moonshotai/kimi-k2.7"`); empty uses the engine's `model_default` |
+| `model` | Exact locally available model selected per task and recorded in the bound assessment; OpenRouter candidates use an explicit current `openrouter/<exact-model-slug>` through `opencode`, not an implicit default |
+| `billing_route` | Explicit `subscription` or `api`; subscription priority never grants paid API authority |
 | `task_type` | Optional free-form string naming the kind of work this task is, so the model-performance log can slice pass rates by task shape rather than only by model. Suggested vocabulary: `code-feature`, `code-fix`, `code-review`, `test-hardening`, `docs`, `research`, `persona-review`, `copywriting`, `site-build`, `motion-design`, `image-gen`, `data-pipeline`, `format-conversion`, `probe`, `bakeoff`. Empty is allowed; the log just reports it under `(none)`. |
 | `timeout_s` | Per-task kill timer (default 900) |
 | `max_attempts` | How many times this task may run (default 2 — one try plus one retry with the check's failure output injected). Set `1` for a hard no-retry lane |
@@ -124,14 +135,17 @@ source you can already point at, `ask` selects the passages that match the
 request, caps the packet, and runs a single worker on it:
 
 ```bash
-./ringer.py ask "Why did the Wednesday release slip?" --source notes/status.md
+./ringer.py ask "Why did the Wednesday release slip?" --source notes/status.md --dry-run
+# Save and fill the source-bound draft, then repeat with --assessment PATH.
 ./ringer.py ask "..." --source src/ --source docs/ --dry-run   # show the packet, spend nothing
 ```
 
 Repeat `--source` for more files or directories. `--state` takes a small file
 of settled decisions and is preferred over ordinary sources when the packet is
 tight. `--max-packet-bytes` sets the budget (default 16,000). `--dry-run`
-prints the selection report and stops before any model call. `--redact` keeps
+prints the selection report and source-bound assessment draft, and stops before
+any model call. Fill the draft and pass `--assessment` before dispatch; the
+lighter `ask` path still requires model-fit assessment. `--redact` keeps
 the request out of the run state and eval row. The run appears on Ringside and
 in the artifact library like any other.
 
@@ -193,11 +207,32 @@ For Codex, run:
 
 This installs the Codex-native ringer skill under `~/.agents/skills/ringer` (the path Codex discovers repository and user skills) and merges equivalent `PreToolUse` and `PostToolUse` nudges into `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json` if `CODEX_HOME` is set — skill discovery is not tied to `CODEX_HOME`, only hook/config storage is). Start a new Codex session, open `/hooks`, and approve the two Ringer hooks before they can run. Codex owns hook trust; the installer does not bypass that review.
 
-The Codex playbook keeps the current Codex model in the coordinator seat and defaults implementation to the OpenCode/OpenRouter lane. The hooks understand canonical Codex `Bash` and `apply_patch` payloads (with the command source in `tool_input.command`) as well as the `functions.exec` compatibility shape, while preserving the same once-per-session, non-blocking behavior.
+The Codex playbook keeps current Codex in the coordinator seat and allows Codex subscription workers. Use Ringer automatically when beneficial, without permission or model-selection confirmation; prioritise suitable authenticated subscription models through their native configured harness for complicated work. The hooks understand canonical Codex `Bash` and `apply_patch` payloads (with the command source in `tool_input.command`) as well as the `functions.exec` compatibility shape, while preserving the same once-per-session, non-blocking behavior.
 
 The hooks never block anything. A user who says "just do it inline" is obeyed. Uninstall with `./ringer.py uninstall-agent` for Claude Code or `./ringer.py uninstall-agent --codex` for Codex. Add `--project` to either command to use the current project's `.claude` directory or the current project's `.agents` (skill) and `.codex` (hooks) directories instead of the user-level installation. Running `install-agent --codex --project` from inside the Ringer repository itself is safe: the canonical skill is left in place (the source is the target) and only the hooks are written.
 
 For CI and evals, `config.sample.toml` includes `[engines.mock]` so the enforcement stack can be tested without an API bill.
+
+## Automatic routing and assessment
+
+Choices within existing authority are coordinator decisions; only genuinely
+missing authority warrants a question. Select exact locally available model
+and effort per task from configured harnesses and observed auth/quota. Record
+explicit subscription billing and standard service for subscription workers.
+Keep executable checks, sandbox, source integrity and artifact-bound review
+receipts. Never silently fall back to paid API or Fast, change credentials,
+top up or change budget caps.
+
+Every real Ringer model job requires a bound model-fit assessment, including
+one-task jobs, `ask`, `demo`, reviews and repairs. Assessment is NOT user
+approval. Generate the zero-model draft with `ringer.py assess`, fill each
+judgement, lint and inspect the dry-run command before dispatch. Reassess after
+execution-relevant changes. See [model routing](docs/MODEL-ROUTING.md) and
+[model evaluation](docs/MODEL-EVALUATION.md). This supersedes historical
+OpenRouter-first/OpenCode-only routing, no-Codex-worker rules and job-specific
+subscription restrictions; historical notes remain evidence, not current orders.
+Product PASS and export PASS remain separate from human promotion: a worker
+cannot issue its own human review receipt, and coordinator review precedes use.
 
 ## Engines are pluggable
 
@@ -213,9 +248,9 @@ args_template = ["run", "{spec}", "--dir", "{taskdir}"]
 
 Per-task `"engine": "mymodel"` routes work to it — the invariants (stdin closed, process-group kill, executed verification, raw logs) apply to every engine identically.
 
-### The universal harness: OpenCode + OpenRouter
+### The OpenRouter harness: OpenCode
 
-Unless a model ships its own first-class harness (Codex does), OpenCode is the harness that runs it — one engine block covers every OpenRouter-served model. `config.sample.toml` includes a ready-to-uncomment engine whose `{model}` placeholder is filled per task from the manifest's `"model"` field, with `model_default` as the fallback. The shipped default is OpenRouter's `z-ai/glm-5.2` — roughly $0.74/M input and $2.33/M output (2026-07), about 20-30x cheaper output than frontier coding models; a complete write-code-and-pass-the-check task lands around a penny.
+For OpenRouter candidates, OpenCode is the configured harness: use per-task `"engine": "opencode"` and an explicit currently available `"model": "openrouter/<exact-model-slug>"` after catalog and task-family evidence review. Subscription models use their native configured harness. Historical July 2026 setup note: the GLM `z-ai/glm-5.2` default was estimated at $0.74/M input and $2.33/M output, roughly 20–30x cheaper output than frontier models and around a penny per checked task. Those estimates describe an earlier cheap lane; they do not authorise an implicit model or prove current quality. Keep the selected model explicit in the task and matching assessment, rather than cloning engine blocks or hiding model switches in `engine_args`.
 
 OpenCode ships no OS sandbox, so the engine's `bin` points at an absolute path to `engines/opencode-sandboxed.sh` (ringer does not resolve engine bins relative to the repo): a macOS Seatbelt wrapper that leaves network and reads open but confines writes to the task dir, a per-run scratch dir (wired as the agent's `TMPDIR`/`XDG_CACHE_HOME`), and OpenCode's own state/config dirs. Its `--dangerously-skip-permissions` flag only silences OpenCode's interactive prompts; Seatbelt is the actual containment. Task paths reach the profile as `sandbox-exec -D` parameters rather than string interpolation, so a task dir with quotes or parens can't inject sandbox rules. `--no-sandbox` is wired as the engine's `full_access_args`, so ringer's `allow_full_access` gate still governs escapes. Non-macOS installs need their own sandbox (or full-access mode).
 
@@ -238,7 +273,7 @@ opencode auth login   # select OpenRouter, paste the key
 #    itself; there is no OS write-confinement then, so keep manifests scoped.)
 ```
 
-Route with per-task `"engine": "opencode"`, pick the model with per-task `"model": "openrouter/<any-model>"`, and set reasoning effort via `engine_args`: `["--variant", "low|high|max"]`. A sensible split: mechanical or tightly-specced tasks on the cheap lane, gnarly ones on your frontier engine — the executed check catches shortfalls either way, and `swarm_runs` rows tell you whether the cheap lane's pass rate holds.
+Choose a supported reasoning variant explicitly in `engine_args`, and verify that the bound assessment matches the resolved command. Paid OpenRouter routes require existing API authority and budget admission; these calls do not use Codex subscription quota. A catalog listing, free promotion or compatible command does not establish quality or grant paid authority.
 
 ### The plan lane: Grok Build CLI
 
@@ -368,11 +403,26 @@ The scoreboard only knows models you've already run. To reason about models you 
 | `--changes` | Print the recorded add/remove/price_change/went_free/went_paid events from `.changes.jsonl` |
 | `--json` | Emit the snapshot (or, with `--changes`, the event log) as JSON for piping |
 
-The snapshot lives at `~/.ringer/openrouter-catalog.json`; the change log sits beside it as `~/.ringer/openrouter-catalog.changes.jsonl`, appending one row per added, removed, price-changed, went-free, or went-paid event between snapshots. Free promos get their own call-out (`went_free`) because a temporarily-free model is a zero-cost experiment — the cheapest way to audition a new model is to catch it while someone else is paying for it.
+The snapshot lives at `~/.ringer/openrouter-catalog.json`; the change log sits beside it as `~/.ringer/openrouter-catalog.changes.jsonl`, appending one row per added, removed, price-changed, went-free, or went-paid event between snapshots. Free promotions are catalog signals, not automatic experiment slots or permission to spend.
 
 Catalog fetches are throttled to once per 24 hours. A `run` triggers that refresh in the background on its way up; it never blocks or fails a run — if the fetch is slow or the network is down, Ringer carries on with the snapshot it has. The throttle and the auto-refresh-on-run are both documented in `./ringer.py run --help` and can be turned off there.
 
-Once you have a catalog and a log, `models --explore` joins them into a routing recommendation:
+Before selecting an OpenRouter candidate, review the current catalog and
+task-family evidence. If capability assessment is missing or older than 24
+hours, refresh it before selection:
+
+```bash
+python3 scripts/assess_openrouter.py --refresh --out ~/.ringer/model-assessment
+```
+
+See [model evaluation](docs/MODEL-EVALUATION.md). Automatic weekly catalog-only
+refresh uses zero inference; it does not run probes or benchmarks, authorise
+API spending or replace capability assessment before selection. Catalog
+compatibility does not prove best quality. If refresh or relevant evidence is
+unavailable, do not silently select a stale candidate. The run's non-blocking
+catalog fetch does not satisfy this pre-selection requirement.
+
+`models --explore` supplies optional candidates rather than a compulsory lane:
 
 ```bash
 ./ringer.py models --explore                 # tiers across all task types
@@ -381,11 +431,11 @@ Once you have a catalog and a log, `models --explore` joins them into a routing 
 
 Models with local evidence are sorted into tiers:
 
-- **proven** — 3+ tasks of this `task_type` logged, with `first_try_pass_rate >= 0.67`. The lane you trust with heavy work.
+- **proven** — at least 30 distinct jobs in the same named task family, with first-try pass rate at least 75% and final-check pass rate at least 85%. This is an evidence label, not human promotion.
 - **probation** — some attempts logged but not enough volume or not enough first-try passes. Use it; don't lean on it.
 - **untested** — nothing in the log yet. Pulled from the catalog: text→text, 32k+ context window, up to 10 candidates, FREE models first then cheapest. These are your audition queue.
 
-The promotion ladder is the point. A model enters as **untested**. You spend a small slice of suitable runs — about one task per run — auditioning cheap or free candidates on small, low-stakes work where the executed check is strong and the single retry absorbs the failure: docs sweeps, mechanical edits, persona reviews. While evidence accumulates the model sits on **probation**. At 3+ tasks with `first_try_pass_rate >= 0.67` it's **proven** for that task type and earns a lane on the heavy work. The recommendation flow is the same one this ladder implies: exploit proven models for the load-bearing tasks, and keep spending that small slice auditioning untested candidates so the bench refills itself.
+Exploration is optional when it benefits the job, fits existing authority and has a strong executed check; there is no forced exploration task per batch. Candidates remain provisional while evidence accumulates. Repeated rounds of one job, mixed families, identity mismatches and unattributed rows cannot meet the 30-job floor. Keep a stable `job_id` across rounds and inspect per-family `routing_evidence`. A first 20-case microbenchmark is preliminary. Human review is required before global promotion, regardless of the statistical label; a worker cannot create its own approval receipt. The historical three-job/67% ladder is superseded.
 
 The per-user philosophy, stated plainly: every user's workload is different, so the scoreboard learns what works for *your* tasks on *your* machine. A model that's proven in someone else's log is untested in yours until you've run it. The numbers are not portable between users, and the routing recommendations get personal as the log grows — which is exactly why the catalog and the change log stay local and the explore tiers are computed from your own `runs.jsonl`, not from anyone's aggregate.
 
@@ -434,4 +484,4 @@ Built by [Nate Jones](https://natejones.com) and maintained by [LEJ](https://lim
 
 ## Fork additions
 
-This is [thebytorsnowdog/ringer](https://github.com/thebytorsnowdog/ringer), a fork of [NateBJones-Projects/ringer](https://github.com/NateBJones-Projects/ringer). Its `main` mirrors upstream; its `ian` branch is upstream plus Codex as a coordinating host, `--writable-root` for sandboxed OpenCode workers, a GLM 5.3 Flash registry entry, cost, billing, reliability and model-routing evidence (with an opt-in model-fit gate), the `ringer-discover` companion and a mission-fit gate for agents. See [docs/fork/README.md](docs/fork/README.md).
+This is [thebytorsnowdog/ringer](https://github.com/thebytorsnowdog/ringer), a fork of [NateBJones-Projects/ringer](https://github.com/NateBJones-Projects/ringer). Its `main` mirrors upstream; its `ian` branch is upstream plus Codex as a coordinating host, `--writable-root` for sandboxed OpenCode workers, a GLM 5.3 Flash registry entry, cost, billing, reliability and model-routing evidence (with a required pre-dispatch model-fit gate), the `ringer-discover` companion and a mission-fit gate for agents. See [docs/fork/README.md](docs/fork/README.md).

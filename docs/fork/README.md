@@ -29,6 +29,7 @@ and stays level with it.
 | `feat/host-neutral-coordinator` | Any host coordinates (Antigravity by default); Codex is a worker only | Fork only |
 | `feat/engine-effort-flag` | Optional engine `effort_flag` so CLIs like Claude Code (`--effort`) pass the model-fit gate | Candidate PR |
 | `feat/subscription-workers` | Model notes for the Claude and Grok subscription workers; check-timeout lesson | Fork only |
+| `feat/antigravity-nudge` | Antigravity PreInvocation hook to route inline work through Ringer | Fork only |
 
 ## Staying level with upstream
 

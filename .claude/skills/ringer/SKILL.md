@@ -67,8 +67,9 @@ prints the same findings as non-blocking warnings.
 ## Automatic use and subscription routing
 
 Use Ringer whenever the workflow benefits from it, without asking permission
-or requiring model-selection confirmation. Current Codex remains coordinator
-for specs, checks, routing and review; Codex subscription workers are allowed.
+or requiring model-selection confirmation. The current host (Antigravity by
+default) coordinates specs, checks, routing and review. Codex subscription
+workers remain allowed but are not preferred.
 For complicated tasks prioritise suitable already-authenticated subscription
 models through their native configured harness. Read local configuration and
 observed auth/quota, then choose the exact locally available model and supported

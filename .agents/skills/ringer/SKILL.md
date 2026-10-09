@@ -1,19 +1,19 @@
 ---
 name: ringer
 description: >-
-  Orchestrate verified parallel work with Ringer from Codex. Load before
+  Orchestrate verified parallel work with Ringer from any host. Load before
   running any model-backed probe, smoke test, simulation, grader, persona
   harness, or CLI agent; before an edit-test-edit loop or batch of similar
   edits; when reviewing failed worker output; and when writing or reviewing
   manifests, choosing swarm patterns or worker engines, or debugging a run.
-  Use Ringer automatically when beneficial. Codex coordinates; suitable
+  Use Ringer automatically when beneficial. The host coordinates; suitable
   authenticated subscription workers use their native configured harness.
   Assess exact model, effort, billing and service before dispatch. Skip read-only file search,
   git operations, pure conversation or prose, and one one-file, few-line,
   one-shot edit; a second pass is a loop and triggers Ringer.
 ---
 
-# Ringer orchestrator playbook (Codex host)
+# Ringer orchestrator playbook (any coordinating host)
 
 ## Read this first — the four rules that actually get broken
 
@@ -93,8 +93,9 @@ make it a manifest.
 ## Automatic use and subscription routing
 
 Use Ringer whenever the workflow benefits from it, without asking permission
-or requiring model-selection confirmation. Current Codex remains coordinator
-for specs, checks, routing and review; Codex subscription workers are allowed.
+or requiring model-selection confirmation. The current host (Antigravity by
+default) coordinates specs, checks, routing and review. Codex subscription
+workers remain allowed but are not preferred.
 For complicated tasks prioritise suitable already-authenticated subscription
 models through their native configured harness. Read local configuration and
 observed auth/quota, then choose the exact locally available model and supported

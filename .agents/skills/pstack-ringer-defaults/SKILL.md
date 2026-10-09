@@ -22,9 +22,9 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
 ## 2. Who does what
 
 - **Implementation, probes, review scouts, personas, mechanical edits** go through Ringer, automatically, without asking permission or model-selection confirmation. Tell Ian what was chosen and why.
-- **Worker routing.** For complicated work prioritise suitable already-authenticated subscription models (Codex subscription workers allowed) through their native configured harness. Select exact locally available model and effort per task, with explicit `billing_route: subscription` and `service_tier: standard`. Other work uses `opencode` with an explicit assessed OpenRouter slug. Within existing authority these are coordinator decisions; ask only for genuinely missing authority. No silent paid API or Fast fallback and no budget-cap changes.
+- **Worker routing.** For complicated work prioritise suitable already-authenticated subscription models (Claude Code and Grok preferred; Codex allowed but not preferred) through their native configured harness. Select exact locally available model and effort per task, with explicit `billing_route: subscription` and `service_tier: standard`. Other work uses `opencode` with an explicit assessed OpenRouter slug. Within existing authority these are coordinator decisions; ask only for genuinely missing authority. No silent paid API or Fast fallback and no budget-cap changes.
 - **Model-fit assessment before every model job.** Assessment is NOT user approval. Before selecting OpenRouter candidates, review catalog and task-family evidence; refresh missing or >24h-old assessment with `python3 scripts/assess_openrouter.py --refresh --out ~/.ringer/model-assessment` (see `docs/MODEL-EVALUATION.md`). Catalog compatibility does not prove quality. Exploration is optional. Global promotion requires 30 distinct jobs per family, 75% first-try and 85% final-check passes, plus human review.
-- **Judgment panels** (`architect` exploration, `interrogate`, arena cross-judge, picking a base) stay as pstack frontier dispatch. Model diversity is the point, and the output is a decision, not a checkable artifact.
+- **Judgment panels** (`architect` exploration, `interrogate`, arena cross-judge, picking a base) need model diversity, and their output is a decision, not a checkable artifact. From Antigravity, run them as Ringer `adversarial-review` jobs across the configured subscription workers. Inside Claude Code, pstack's own frontier dispatch is fine.
 - **Arena on code** is split. Candidates are Ringer tasks (same spec, different models, separate worktrees). Judging, picking and grafting stay with the coordinator plus the pstack cross-judge.
 - **Workers never orchestrate.** Specs carry every hard rule. Do not load these defaults into worker prompts.
 
@@ -60,8 +60,8 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
 | Host | pstack | Ringer |
 |---|---|---|
 | Claude Code | Native `/pstack:*` | `~/.claude/skills/ringer` plus hooks |
-| Codex | `Use pstack:<skill>` if the plugin resolves, otherwise read the leaf files | `~/.agents/skills/ringer` (Codex-host playbook) |
-| Antigravity | Read the leaf files. Same-model subagents give a panel no diversity; say so or launch external CLIs. | `~/.agents/skills/ringer` via shell |
+| Codex | Worker only (no longer a coordinator) | worker engine `codex` |
+| Antigravity (primary, rules owner) | Read the leaf files. Panels run as Ringer `adversarial-review` (pstack's launcher needs `bun`, not installed). | `~/.agents/skills/ringer` via shell |
 | Hermes | `pstack-*` subset installed; read missing ones from the leaf files | via shell |
 | Grok | Panelist or worker only; cannot host pstack | worker only |
 | OpenCode | Worker harness; follows its spec, not these rules | n/a |

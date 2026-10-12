@@ -39,6 +39,8 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          # update-ian.sh adds an 'upstream' remote, which gh would otherwise target.
+          GH_REPO: ${{ github.repository }}
         run: |
           title="Fork sync failed"
           body="The weekly update of ian failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

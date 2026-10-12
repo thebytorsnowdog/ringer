@@ -51,6 +51,11 @@ allow_fast_service = false
 # Model-fit validation runs before billing admission, so an invalid or stale
 # assessment cannot reserve spend. It does not relax any policy cap.
 
+[hud]
+port = 8700
+# Reuse an open Ringside tab instead of opening another; --force-open overrides this.
+reuse_open_tab = true
+
 [update]
 # Check origin/main before command dispatch and let a long-running HUD check
 # again on this interval. Updates apply only as a clean ff-only move on main.

@@ -248,6 +248,7 @@ checks and raw logs support — no vibes, no worker self-reports.
   `--bare` (forces ANTHROPIC_API_KEY auth).
 
 - 2026-10-09 — code-feature (antigravity nudge hook, run rules-owner-followups): PASS attempt 1 (95s, ~200k tokens). Follow-up to the hung Grok attempt above. Passed exactly the same specification and behavioural tests.
+- 2026-10-16 — code-feature (omabrain-eating-pace, high): PASS attempt 1, 521.7s, stayed inside ownership. Coordinator's export `git add -A && git diff --cached > out.patch` swept the claude engine's `.runtime/` into the patch AND into the repo's object store, including a copy of `.credentials.json`. Local only (patch shredded, unreachable blobs removed), but always use `git add -A -- . ':!.runtime'` in claude-engine worktree checks.
 ## Process lessons (cross-model)
 
 - 2026-10-09 — Checks default to a 60s timeout. A check that runs a

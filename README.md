@@ -392,7 +392,7 @@ Four rules are baked into every worker invocation. They all cost us real debuggi
 
 Every community PR that lands in main is credited here — that's a project rule, enforced by a test. Thank you:
 
-- [@thebytorsnowdog](https://github.com/thebytorsnowdog) (Ian Dunsmore) — maintains the [thebytorsnowdog/ringer](https://github.com/thebytorsnowdog/ringer) fork
+- [@thebytorsnowdog](https://github.com/thebytorsnowdog) (Snowy / Ian Dunsmore) — maintains the [thebytorsnowdog/ringer](https://github.com/thebytorsnowdog/ringer) fork
 - [@Fiddlehead-MB](https://github.com/Fiddlehead-MB) (Melinda Byerley) — exact-byte demo checks, explicit newline instructions, and regression coverage (#101)
 - [@oceanonline](https://github.com/oceanonline) — portable `python3` in template checks + lint quickstart path fix (#24)
 - [@davekopecek](https://github.com/davekopecek) (Dave Kopecek) — committed the design-reference fixture so the design-token guard runs on every machine (#30)

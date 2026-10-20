@@ -32,8 +32,8 @@ jobs:
       - name: Update ian
         run: |
           # Merge commits are credited to the fork's maintainer (README Contributors).
-          git config user.name thebytorsnowdog
-          git config user.email thebytorsnowdog@users.noreply.github.com
+          git config user.name Snowy
+          git config user.email 215750096+thebytorsnowdog@users.noreply.github.com
           scripts/fork/update-ian.sh
       - name: Report failure
         if: failure()

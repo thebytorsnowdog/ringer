@@ -339,9 +339,24 @@ Run-level `"worktrees": true` gives each task an isolated git worktree of
 1. **Passing tasks get their worktree DELETED.** Deliverables must land
    outside the task worktree, or the check must export them first.
 2. **Worker commits die with the worktree.** Pattern that works: the
-   worker leaves changes uncommitted; the check runs
-   `git add -A && git diff --cached > <path-outside-worktree>.patch` and
-   validates the patch. You apply and commit on your branch after review.
+   worker leaves changes uncommitted; the check stages everything except
+   the engine's `.runtime/` session tree, then exports and validates the
+   patch:
+
+   ```sh
+   git add -A -- . ':(exclude).runtime' ':(exclude).runtime/**' \
+     ':(exclude,glob)**/.runtime' ':(exclude,glob)**/.runtime/**' &&
+   git reset -q -- .runtime ':(glob)**/.runtime/**' &&
+   git diff --cached > <path-outside-worktree>.patch
+   ```
+
+   Never export with a plain `git add -A`. The Claude engine writes
+   `.runtime/` (CLAUDE_CONFIG_DIR and XDG dirs, including `.credentials.json`)
+   inside the worktree, and a plain sweep copied it into a patch on
+   16 Oct 2026. The `git reset` drops a `.runtime/` that a worker already
+   staged. This is the same staging the fix-swarm, test-hardening and
+   migration-swarm checks use. You apply and commit on your branch after
+   review.
 3. **Logs survive** (they go to `<workdir>/logs/`), so post-mortems work
    even on deleted worktrees.
 4. **Gitignored outputs silently vanish from patch exports.** `git add -A`

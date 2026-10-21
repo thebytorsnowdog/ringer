@@ -52,6 +52,30 @@ def run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def stage_workdir_for_export() -> subprocess.CompletedProcess[str]:
+    """Stage the worktree, excluding the Claude engine `.runtime/` tree.
+
+    That folder is engine session state. An export on 16 Oct included
+    `.runtime/.credentials.json`. Do not stage it, and unstage it if a
+    worker already did.
+    """
+    added = run_git(
+        [
+            "add",
+            "-A",
+            "--",
+            ".",
+            ":(exclude).runtime",
+            ":(exclude).runtime/**",
+            ":(exclude,glob)**/.runtime",
+            ":(exclude,glob)**/.runtime/**",
+        ]
+    )
+    if added.returncode != 0:
+        return added
+    return run_git(["reset", "-q", "--", ".runtime", ":(glob)**/.runtime/**"])
+
+
 def attempt_patch_path(canonical_patch: Path) -> Path:
     suffix = canonical_patch.suffix
     stem = canonical_patch.name[: -len(suffix)] if suffix else canonical_patch.name
@@ -163,7 +187,7 @@ def main() -> int:
                 )
             )
 
-    add_result = run_git(["add", "-A"])
+    add_result = stage_workdir_for_export()
     if add_result.returncode != 0:
         failures.append(fail("git_add_failed", output_tail(add_result.stdout)))
 

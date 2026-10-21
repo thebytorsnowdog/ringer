@@ -36,6 +36,11 @@ def normalize(path: str) -> str:
     return path.strip().strip("/").replace("\\", "/")
 
 
+def is_runtime_export_path(path: str) -> bool:
+    """True for the Claude engine `.runtime/` tree, which must not be exported."""
+    return ".runtime" in normalize(path).split("/")
+
+
 def is_under(path: str, roots: list[str]) -> bool:
     rel = normalize(path)
     for root in roots:
@@ -74,7 +79,7 @@ def changed_paths_from_status() -> list[str]:
         if " -> " in payload:
             payload = payload.split(" -> ", 1)[1].strip()
         paths.append(normalize(payload))
-    return paths
+    return [path for path in paths if not is_runtime_export_path(path)]
 
 
 def validate_changed_paths(changed: list[str], owned: list[str], forbidden: list[str]) -> bool:
@@ -183,11 +188,30 @@ def parse_test_count(output: str, regex: str) -> int | None:
     return max(matches) if matches else None
 
 
+def stage_workdir_for_export() -> subprocess.CompletedProcess[str]:
+    """Stage changes except the Claude engine `.runtime/` tree."""
+    added = run_git(
+        [
+            "add",
+            "-A",
+            "--",
+            ".",
+            ":(exclude).runtime",
+            ":(exclude).runtime/**",
+            ":(exclude,glob)**/.runtime",
+            ":(exclude,glob)**/.runtime/**",
+        ]
+    )
+    if added.returncode != 0:
+        return added
+    return run_git(["reset", "-q", "--", ".runtime", ":(glob)**/.runtime/**"])
+
+
 def export_patch(patch_path: Path, owned: list[str], forbidden: list[str]) -> bool:
-    add = run_git(["add", "-A"])
+    add = stage_workdir_for_export()
     if add.returncode != 0:
-        print("FAIL: git add -A failed")
-        print(add.stderr.strip())
+        print("FAIL: git add excluding .runtime failed")
+        print(add.stderr.strip() or add.stdout.strip())
         return False
     diff = run_git(["diff", "--cached", "--name-only", "--diff-filter=ACMRTD"])
     if diff.returncode != 0:

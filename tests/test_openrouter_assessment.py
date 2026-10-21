@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -277,6 +278,48 @@ class PublicationTests(unittest.TestCase):
         for timeout in (0, -1, float('inf'), float('nan')):
             with self.assertRaises(ValueError):
                 catalog.run(self.source, self.out, timeout=timeout)
+
+    def test_symlinked_system_temp_parent_is_accepted(self):
+        # macOS tempfile lives under /var/folders while /var -> /private/var.
+        # TMPDIR through a symlinked parent must publish; a caller-controlled
+        # symlink output, or a symlink parent outside that temp path, must not.
+        private = self.root / 'private' / 'var' / 'folders'
+        private.mkdir(parents=True)
+        var_link = self.root / 'var'
+        var_link.symlink_to(self.root / 'private' / 'var')
+        temp_through_link = var_link / 'folders'
+        source = temp_through_link / 'source.json'
+        source.write_bytes(raw(model()))
+        out = temp_through_link / 'job' / 'report'
+        previous_tmpdir = os.environ.get('TMPDIR')
+        previous_tempdir = catalog.tempfile.tempdir
+        os.environ['TMPDIR'] = str(temp_through_link)
+        catalog.tempfile.tempdir = None
+        try:
+            self.assertEqual(os.path.abspath(temp_through_link), catalog.tempfile.gettempdir())
+            self.assertTrue(var_link.is_symlink())
+            with patch.object(catalog, 'utc_now', return_value=NOW):
+                catalog.run(source, out)
+                catalog.run(source, out)
+            self.assertEqual(source.read_bytes(), (out / 'catalog.json').read_bytes())
+            self.assertEqual(2, len(list((out / 'snapshots').iterdir())))
+            alias = temp_through_link / 'alias'
+            alias.symlink_to(out)
+            with self.assertRaises(ValueError):
+                catalog.run(source, alias)
+            outside = self.root / 'outside'
+            outside.mkdir()
+            planted = self.root / 'planted'
+            planted.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                catalog.run(source, planted / 'report')
+            self.assertFalse((outside / 'report').exists())
+        finally:
+            catalog.tempfile.tempdir = previous_tempdir
+            if previous_tmpdir is None:
+                os.environ.pop('TMPDIR', None)
+            else:
+                os.environ['TMPDIR'] = previous_tmpdir
 
 
 if __name__ == '__main__':

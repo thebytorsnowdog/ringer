@@ -45,14 +45,11 @@ evidence. Moving tokens from the coordinator into a worker is not itself a
 saving. Report the fixed subscription fee separately from API cash. Label
 source-bound calculations as estimates, and leave unsupported values unknown.
 
-The user confirmed GBP 90/month for ChatGPT Pro. That personal assumption is in `config/cost-policy.example.json`, not a library constant or the CLI's default policy. The account snapshot observed at `2026-09-03T08:23:39.686Z` reported:
+`config/cost-policy.example.json` includes `monthly_subscription_gbp` so the policy shape is visible. The number there is an example. Replace it, and `subscription_fee_evidence`, with your own assumption and the date you checked it. The example is neither a library constant nor the CLI default. Ringer loads it only when you pass `--policy`.
 
-- `planType=prolite`. The mapping to a published Pro tier is unverified.
-- Codex primary window: 10,080 minutes, 74% used, resetting at **7 September 2026, 03:38:35 Europe/London**.
-- No separate five-hour Codex window in that response. The other named model's window is not a substitute.
-- Purchased credit balance `0`, `hasCredits=false`, no purchased resets reported, and `spendControlReached=false`.
+Keep a live account snapshot in a local file. The fields worth recording are plan type, whether that type maps to a published tier, window length, percent used, reset time, and purchased-credit balance. A window reported for one model does not stand in for another model's window. A percentage is not a remaining token balance. Neither preflight nor scenario calculations convert it into one.
 
-The published Pro 5x local-message estimates per five hours are Sol 50–500, Terra 125–1,000 and Luna 1,250–10,000, with additional weekly limits. These ranges are estimates, not guaranteed entitlements, and the exact underlying quota is unavailable. A percentage is not a remaining token balance. Neither preflight nor scenario calculations convert it into one.
+The published Pro 5x local-message estimates per five hours are Sol 50–500, Terra 125–1,000 and Luna 1,250–10,000, with additional weekly limits. These ranges are estimates, not guaranteed entitlements, and the exact underlying quota is unavailable.
 
 ChatGPT authentication uses subscription access. API-key authentication is a different billing route; exhaustion does not automatically roll over to it. Credits are another paid category, distinct from API-key and OpenRouter billing. Existing explicit OpenRouter routes remain API routes.
 
@@ -69,7 +66,7 @@ Call `validate_cost_policy(raw) -> dict` once after reading JSON. The returned m
 | `automatic_paid_fallback` | Boolean; default `false`. Never changes a route automatically. |
 | `subscription_auth_modes` | List containing only `chatgpt`, or empty to disable subscription dispatch. API auth cannot be relabelled as included. |
 | `snapshot_max_age_seconds` | Positive integer; default `900`. This is an operational freshness limit, not a provider quota guarantee. |
-| `monthly_subscription_gbp` | Optional fixed fee. Omission means UNKNOWN, not zero or GBP 90. |
+| `monthly_subscription_gbp` | Optional fixed fee. Omission means UNKNOWN. A number in the example file is a placeholder. |
 | `subscription_fee_evidence` | Optional text identifying the fee assumption. |
 | `fx` | Optional positive `usd_to_gbp`, ISO `dated` date and optional `source`. |
 | `pricing` | Optional exact model identities mapped to dated USD-per-million input/cache/output rates. |
@@ -225,7 +222,7 @@ For a scenario, let `J` be monthly jobs, `I` included jobs, `r` assumed acceptan
 - Cost per accepted job: divide either monthly total by `J × r`, once.
 - Break-even: `I × P × x >= F`, or required included jobs `F / (P × x)`.
 
-`--api-cost-per-job-usd` must include every failed attempt and retry for a whole requested job. It is a transparent assumption, not inferred from syntax checks or missing invoices. Both alternatives use the same assumed acceptance rate; no measured quality claim follows. `I` is a scenario assumption, not a derived subscription token/message entitlement. Zero acceptance or a zero break-even denominator is explicitly UNKNOWN. With 100 jobs, 80 included and acceptance rate 0.8, a GBP 90 fee contributes `90/80 = GBP 1.125` per accepted job before overflow. There is no second division by observed journal passes.
+`--api-cost-per-job-usd` must include every failed attempt and retry for a whole requested job. It is a transparent assumption, not inferred from syntax checks or missing invoices. Both alternatives use the same assumed acceptance rate; no measured quality claim follows. `I` is a scenario assumption, not a derived subscription token/message entitlement. Zero acceptance or a zero break-even denominator is explicitly UNKNOWN. With 100 jobs, 80 included and acceptance rate 0.8, an example fee of GBP 100 contributes `100/80 = GBP 1.25` per accepted job before overflow. There is no second division by observed journal passes.
 
 ## Verification
 

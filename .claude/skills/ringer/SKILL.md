@@ -130,9 +130,9 @@ delegation ownership and accounting controls are verified. Standard service is
 the default and a host's high effort is never inherited. Fast requires existing
 explicit paid authority and is never inferred from effort. Require observed
 ChatGPT authentication and quota for subscription routes. There is no
-automatic paid fallback or top-up; current API caps are £0 alongside the
-shared £90 subscription fee. The earlier job-specific Astra subscription
-restriction is historical and superseded by the policy above; it was not a
+automatic paid fallback or top-up. The example policy sets the monthly API
+cap to £0. Record any subscription fee in your local cost policy. The earlier
+job-specific Astra subscription restriction is historical and superseded by the policy above; it was not a
 global promotion. Select an exact locally available model and effort per task. Never silently fall back to
 another model, billing route or service tier, or change budget caps.
 

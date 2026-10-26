@@ -156,9 +156,9 @@ delegation ownership and accounting controls are verified. Standard service is
 the default and a host's high effort is never inherited. Fast requires existing
 explicit paid authority and is never inferred from effort. Require observed
 ChatGPT authentication and quota for subscription routes. There is no
-automatic paid fallback or top-up; current API caps are £0 alongside the
-shared £90 subscription fee. The earlier job-specific Astra subscription
-restriction is historical and superseded by the policy above; it was not a
+automatic paid fallback or top-up. The example policy sets the monthly API
+cap to £0. Record any subscription fee in your local cost policy. The earlier
+job-specific Astra subscription restriction is historical and superseded by the policy above; it was not a
 global promotion. Select an exact locally available model and effort per task. Never silently fall back to
 another model, billing route or service tier, or change budget caps.
 
@@ -286,8 +286,8 @@ or older than 24 hours, refresh it before selecting an OpenRouter candidate:
 python3 scripts/assess_openrouter.py --refresh --out ~/.ringer/model-assessment
 ```
 
-Read [model evaluation](/home/snowy/Work/GitHub/ringer/docs/MODEL-EVALUATION.md) and
-[model routing](/home/snowy/Work/GitHub/ringer/docs/MODEL-ROUTING.md). Automatic weekly catalog-only
+Read [model evaluation](../../../docs/MODEL-EVALUATION.md) and
+[model routing](../../../docs/MODEL-ROUTING.md). Automatic weekly catalog-only
 refresh uses zero inference; it does not run probes or benchmarks, authorise
 API spending or replace pre-selection capability assessment. Catalog
 compatibility does not prove best quality. If refresh or relevant evidence is

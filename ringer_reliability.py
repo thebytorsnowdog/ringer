@@ -358,8 +358,14 @@ def preflight_local(task: Any, taskdir: Path) -> tuple[str | None, str]:
         if not resolved.is_dir():
             return "missing_dependency", f"preflight write path is not a directory: {resolved}"
         write_paths.append(resolved)
+    worker_command = list(getattr(task, "worker_command", []) or [])
+    if (
+        getattr(task, "restricted_codex", False)
+        and "--dangerously-bypass-approvals-and-sandbox" in worker_command
+    ):
+        return "permission", "Codex sandbox bypass requires full_access"
     if getattr(task, "restricted_codex", False) and write_paths:
-        error, roots = _codex_workspace_write_roots(getattr(task, "worker_command", []))
+        error, roots = _codex_workspace_write_roots(worker_command)
         if error:
             return "permission", error
         task_root = taskdir.resolve(strict=True)

@@ -10454,6 +10454,12 @@ def build_worker_command(
             .replace("{model}", resolved_model)
             .replace("{spec}", spec)
         )
+    if not full_access:
+        command = [
+            arg
+            for arg in command
+            if arg != "--dangerously-bypass-approvals-and-sandbox"
+        ]
     return command
 
 

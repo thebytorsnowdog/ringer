@@ -7292,6 +7292,15 @@ def refresh_catalog_tables(conn: Any, catalog_path: Path) -> None:
 
 
 def refresh_identity_tables(conn: Any, registry_path: Path) -> None:
+    registry_path = registry_path.expanduser().resolve()
+    registry_mtime, registry_size = file_sync_metadata(registry_path)
+    # Same contract as the catalog snapshot: an unchanged file must not
+    # delete and rewrite its tables on every sync. /api/models syncs on poll.
+    if (
+        read_sync_state_int(conn, "identity_registry_mtime_ns", -2) == registry_mtime
+        and read_sync_state_int(conn, "identity_registry_size", -2) == registry_size
+    ):
+        return
     registry = load_model_identity_registry(registry_path)
     conn.execute("DELETE FROM identity")
     conn.execute("DELETE FROM identity_defaults")
@@ -7336,6 +7345,13 @@ def refresh_identity_tables(conn: Any, registry_path: Path) -> None:
                 for engine, identity in sorted(registry.engine_meta.items())
             ],
         )
+    write_sync_state_values(
+        conn,
+        {
+            "identity_registry_mtime_ns": registry_mtime,
+            "identity_registry_size": registry_size,
+        },
+    )
 
 
 @dataclass(frozen=True)

@@ -377,6 +377,69 @@ class ModelDbTests(unittest.TestCase):
             )
         self.assertEqual({"event_insert": 1}, audit_counts)
 
+    def test_identity_sync_skips_unchanged_registry(self) -> None:
+        write_jsonl(self.log_path, [attempt(run_id="run-1")])
+        rebuild_read_model_db(
+            self.db_path,
+            self.log_path,
+            catalog_path=self.catalog_path,
+            registry_path=self.registry_path,
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            display = conn.execute(
+                "SELECT model_display FROM identity WHERE model_key = ?",
+                ("openrouter/z-ai/glm-5.2",),
+            ).fetchone()
+            self.assertEqual("GLM 5.2", display[0])
+            conn.executescript(
+                """
+                CREATE TABLE identity_write_audit(kind TEXT NOT NULL);
+                CREATE TRIGGER audit_identity_insert
+                    AFTER INSERT ON identity
+                    BEGIN
+                        INSERT INTO identity_write_audit(kind) VALUES ('insert');
+                    END;
+                CREATE TRIGGER audit_identity_delete
+                    AFTER DELETE ON identity
+                    BEGIN
+                        INSERT INTO identity_write_audit(kind) VALUES ('delete');
+                    END;
+                """
+            )
+
+        sync_read_model_db(
+            self.db_path,
+            self.log_path,
+            catalog_path=self.catalog_path,
+            registry_path=self.registry_path,
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(0, conn.execute("SELECT COUNT(*) FROM identity_write_audit").fetchone()[0])
+
+        revised = self.registry_path.read_text(encoding="utf-8").replace(
+            'display = "GLM 5.2"',
+            'display = "GLM 5.2 revised"',
+        )
+        self.registry_path.write_text(revised, encoding="utf-8")
+        sync_read_model_db(
+            self.db_path,
+            self.log_path,
+            catalog_path=self.catalog_path,
+            registry_path=self.registry_path,
+        )
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            display = conn.execute(
+                "SELECT model_display FROM identity WHERE model_key = ?",
+                ("openrouter/z-ai/glm-5.2",),
+            ).fetchone()
+            audit_counts = dict(
+                conn.execute(
+                    "SELECT kind, COUNT(*) FROM identity_write_audit GROUP BY kind"
+                ).fetchall()
+            )
+        self.assertEqual("GLM 5.2 revised", display[0])
+        self.assertEqual({"delete": 2, "insert": 2}, audit_counts)
+
     def test_read_paths_do_not_create_or_stamp_schema_for_missing_tables(self) -> None:
         missing_db = self.root / "missing.db"
 

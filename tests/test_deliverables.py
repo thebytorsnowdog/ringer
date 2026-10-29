@@ -24,6 +24,7 @@ from ringer import (  # noqa: E402
     AppConfig,
     ArtifactConfig,
     ArtifactRenderer,
+    ARTIFACT_WRAPPER_TAIL_BYTES,
     DELIVERABLE_MAX_BYTES,
     EngineConfig,
     EvalConfig,
@@ -34,6 +35,7 @@ from ringer import (  # noqa: E402
     TaskSpec,
     artifact_live_path,
     artifact_version_path,
+    image_data_uri,
     read_artifact_library,
     render_final_report_html,
     render_status_html,
@@ -368,6 +370,24 @@ class DeliverableTests(unittest.TestCase):
         self.assertTrue(final_parser.images)
         self.assertEqual("work-thumb", final_parser.images[0].get("class"))
         self.assertTrue(final_parser.images[0].get("src", "").startswith("data:image/jpeg;base64,"))
+
+    def test_image_thumbnail_stops_at_the_wrapper_byte_cap(self) -> None:
+        image = self.root / "hero.jpg"
+        image.write_bytes(b"x" * ARTIFACT_WRAPPER_TAIL_BYTES)
+        self.assertTrue(image_data_uri(image).startswith("data:image/jpeg;base64,"))
+
+        image.write_bytes(b"x" * (ARTIFACT_WRAPPER_TAIL_BYTES + 1))
+        self.assertEqual("", image_data_uri(image))
+
+        state = self.harvested_state()
+        harvested = self.artifacts_dir / "deliverables" / "run-123" / "task-one" / "hero.jpg"
+        harvested.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * ARTIFACT_WRAPPER_TAIL_BYTES)
+        renderer = ArtifactRenderer(self.artifacts_dir / "run-123.html")
+        page = self.artifacts_dir / "run-123.html"
+        html = render_status_html(state, renderer=renderer, page_path=page)
+        self.assert_work_links_resolve(html, page)
+        self.assertNotIn("data:image/", html)
+        self.assertNotIn('class="work-thumb"', html)
 
     def test_empty_work_section_and_final_section_order(self) -> None:
         state = {

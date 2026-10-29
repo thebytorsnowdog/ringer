@@ -106,6 +106,41 @@ class ExtendedReliabilityTests(ReliabilityTests):
         self.assertEqual(1, bad)
         self.assertTrue(path.read_bytes().startswith(original))
 
+    def test_repeat_append_does_not_rescan_complete_history(self):
+        import ringer_reliability
+
+        path = self.root / "events.jsonl"
+        historical = [
+            json.dumps({"event_id": f"hist-{index}", "event": "terminal"})
+            for index in range(40)
+        ]
+        path.write_text("\n".join(historical) + "\n", encoding="utf-8")
+        journal = ringer_reliability.LifecycleJournal(path)
+        loads = {"n": 0}
+        original = ringer_reliability.json.loads
+
+        def counting(text, *args, **kwargs):
+            loads["n"] += 1
+            return original(text, *args, **kwargs)
+
+        first_row = dict(run_id="r", job_id="j", task_key="t", attempt_index=1, event="queued")
+        second_row = dict(first_row, event="attempt_started")
+        with patch.object(ringer_reliability.json, "loads", counting):
+            journal.append(first_row)
+            first_parses = loads["n"]
+            loads["n"] = 0
+            journal.append(second_row)
+            second_parses = loads["n"]
+        self.assertEqual(40, first_parses)
+        self.assertEqual(0, second_parses)
+
+        fresh = ringer_reliability.LifecycleJournal(path)
+        fresh.append(first_row)
+        rows, bad = ringer_reliability.read_jsonl(path)
+        self.assertEqual(0, bad)
+        self.assertEqual(42, len(rows))
+        self.assertEqual(1, sum(row.get("event") == "queued" for row in rows))
+
     def test_validation_rejects_invalid_preflight_retry_and_timeout_fields(self):
         for field, values in {
             "check_timeout_s": [0, -1, float("inf"), float("nan"), True, "70"],

@@ -5081,9 +5081,19 @@ def is_image_deliverable(path: Path) -> bool:
 
 
 def image_data_uri(path: Path) -> str:
+    # The live status page is rewritten about once a second. Keep an inline
+    # thumbnail inside the same byte cap as a text wrapper. The file link stays.
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size > ARTIFACT_WRAPPER_TAIL_BYTES:
+        return ""
     try:
         data = path.read_bytes()
     except OSError:
+        return ""
+    if len(data) > ARTIFACT_WRAPPER_TAIL_BYTES:
         return ""
     guessed, _encoding = mimetypes.guess_type(str(path))
     mime = guessed if guessed and guessed.startswith("image/") else "application/octet-stream"

@@ -176,6 +176,10 @@ class LifecycleJournal:
     """Append-only, fsynced events. Replaying an event never changes its first payload."""
     def __init__(self, path: Path):
         self.path = path
+        # One process appends many events into a journal that keeps every run.
+        # Remember ids already scanned so a later append reads only new bytes.
+        self._seen: set[str] = set()
+        self._scanned = 0
 
     def append(self, payload: dict[str, Any]) -> str:
         identity = [payload[k] for k in ("run_id", "job_id", "task_key", "attempt_index", "event")]
@@ -183,23 +187,51 @@ class LifecycleJournal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a+b") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX)
-            stream.seek(0)
-            data = stream.read()
-            for line in data.splitlines():
-                try:
-                    if json.loads(line).get("event_id") == event_id:
-                        return event_id
-                except (ValueError, AttributeError):
-                    pass
+            self._scan_new_bytes(stream)
+            if event_id in self._seen:
+                return event_id
             row = dict(payload, event_id=event_id, recorded_at=datetime.now(timezone.utc).isoformat())
             # Keep a torn historical tail, but isolate it so new rows remain parseable.
             stream.seek(0, 2)
-            if data and not data.endswith(b"\n"):
-                stream.write(b"\n")
+            end = stream.tell()
+            if end > 0:
+                stream.seek(end - 1)
+                if stream.read(1) != b"\n":
+                    stream.write(b"\n")
             stream.write((json.dumps(row, sort_keys=True) + "\n").encode())
             stream.flush()
             os.fsync(stream.fileno())
+            self._seen.add(event_id)
+            self._scanned = stream.tell()
         return event_id
+
+    def _scan_new_bytes(self, stream: Any) -> None:
+        stream.seek(0, 2)
+        end = stream.tell()
+        if end < self._scanned:
+            self._seen.clear()
+            self._scanned = 0
+        stream.seek(self._scanned)
+        data = stream.read()
+        if not data:
+            return
+        if data.endswith(b"\n"):
+            complete = data
+            consumed = len(data)
+        else:
+            split_at = data.rfind(b"\n")
+            if split_at < 0:
+                return
+            consumed = split_at + 1
+            complete = data[:consumed]
+        for line in complete.splitlines():
+            try:
+                found = json.loads(line).get("event_id")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(found, str):
+                self._seen.add(found)
+        self._scanned += consumed
 
 
 async def stop_process_tree(proc: asyncio.subprocess.Process) -> None:

@@ -5089,9 +5089,19 @@ def is_image_deliverable(path: Path) -> bool:
 
 
 def image_data_uri(path: Path) -> str:
+    # The live status page is rewritten about once a second. Keep an inline
+    # thumbnail inside the same byte cap as a text wrapper. The file link stays.
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size > ARTIFACT_WRAPPER_TAIL_BYTES:
+        return ""
     try:
         data = path.read_bytes()
     except OSError:
+        return ""
+    if len(data) > ARTIFACT_WRAPPER_TAIL_BYTES:
         return ""
     guessed, _encoding = mimetypes.guess_type(str(path))
     mime = guessed if guessed and guessed.startswith("image/") else "application/octet-stream"
@@ -7300,6 +7310,15 @@ def refresh_catalog_tables(conn: Any, catalog_path: Path) -> None:
 
 
 def refresh_identity_tables(conn: Any, registry_path: Path) -> None:
+    registry_path = registry_path.expanduser().resolve()
+    registry_mtime, registry_size = file_sync_metadata(registry_path)
+    # Same contract as the catalog snapshot: an unchanged file must not
+    # delete and rewrite its tables on every sync. /api/models syncs on poll.
+    if (
+        read_sync_state_int(conn, "identity_registry_mtime_ns", -2) == registry_mtime
+        and read_sync_state_int(conn, "identity_registry_size", -2) == registry_size
+    ):
+        return
     registry = load_model_identity_registry(registry_path)
     conn.execute("DELETE FROM identity")
     conn.execute("DELETE FROM identity_defaults")
@@ -7344,6 +7363,13 @@ def refresh_identity_tables(conn: Any, registry_path: Path) -> None:
                 for engine, identity in sorted(registry.engine_meta.items())
             ],
         )
+    write_sync_state_values(
+        conn,
+        {
+            "identity_registry_mtime_ns": registry_mtime,
+            "identity_registry_size": registry_size,
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -10640,6 +10666,12 @@ def build_worker_command(
             .replace("{model}", resolved_model)
             .replace("{spec}", spec)
         )
+    if not full_access:
+        command = [
+            arg
+            for arg in command
+            if arg != "--dangerously-bypass-approvals-and-sandbox"
+        ]
     return command
 
 

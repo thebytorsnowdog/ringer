@@ -3,8 +3,8 @@
   "automatic_paid_fallback": false,
   "subscription_auth_modes": ["chatgpt"],
   "snapshot_max_age_seconds": 900,
-  "monthly_subscription_gbp": 90,
-  "subscription_fee_evidence": "User-confirmed ChatGPT Pro monthly fee, 2026-09-03; personal assumption, not a public plan price",
+  "monthly_subscription_gbp": 100,
+  "subscription_fee_evidence": "Example figure only. Replace with your own fee assumption and the date you checked it.",
   "fx": {
     "usd_to_gbp": "0.7416652271549491",
     "dated": "2026-09-02",

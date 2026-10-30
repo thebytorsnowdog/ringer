@@ -279,6 +279,42 @@ def fetch(timeout):
     return raw, utc_now()
 
 
+def refuse_symlink_output(root):
+    """Refuse a symlinked output, but accept a realpath-checked system temp parent.
+
+    macOS tempfile paths live under /var/folders while /var is a symlink to
+    /private/var. Refusing every symlinked ancestor rejects that layout. The
+    output directory itself is still refused when it is a symlink. A parent
+    symlink is accepted only when resolved comparison shows it is a macOS
+    system temp alias, or an ancestor of this process's temporary directory
+    that still contains both that directory and the output.
+    """
+    root = Path(root).absolute()
+    if root.is_symlink():
+        raise ValueError('symlink output directory or parent refused')
+    system_aliases = {'/tmp': '/private/tmp', '/var': '/private/var'}
+    temp_root = Path(tempfile.gettempdir()).absolute()
+    resolved_temp = temp_root.resolve()
+    for path in root.parents:
+        if not path.is_symlink():
+            continue
+        try:
+            resolved = path.resolve()
+        except OSError:
+            raise ValueError('symlink output directory or parent refused') from None
+        expected = system_aliases.get(str(path))
+        if expected is not None and resolved == Path(expected):
+            continue
+        if path == temp_root or path in temp_root.parents:
+            try:
+                resolved_temp.relative_to(resolved)
+                root.resolve().relative_to(resolved_temp)
+            except (OSError, ValueError):
+                raise ValueError('symlink output directory or parent refused') from None
+            continue
+        raise ValueError('symlink output directory or parent refused')
+
+
 def write_bundle(root, raw, report):
     """Immutable bundle plus one atomic pointer switch; prior snapshot is untouched.
 
@@ -286,8 +322,7 @@ def write_bundle(root, raw, report):
     report freshness. Readers needing a consistent multi-file view pin current once.
     """
     root = Path(root).absolute()
-    if any(path.is_symlink() for path in (root, *root.parents)):
-        raise ValueError('symlink output directory or parent refused')
+    refuse_symlink_output(root)
     initial = not root.exists() or (root.is_dir() and not any(root.iterdir()))
     if not initial:
         if not root.is_dir() or (root / '.catalog-format').read_text() != FORMAT:
@@ -298,7 +333,12 @@ def write_bundle(root, raw, report):
         current = root / 'current'
         if not current.is_symlink() or not os.readlink(current).startswith('snapshots/'):
             raise ValueError('modified current pointer')
-        if not current.resolve().is_relative_to(root / 'snapshots') or (root / 'snapshots').is_symlink():
+        snapshots = root / 'snapshots'
+        try:
+            contained = current.resolve().is_relative_to(snapshots.resolve())
+        except OSError:
+            contained = False
+        if snapshots.is_symlink() or not contained:
             raise ValueError('snapshot pointer escapes output')
     root.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix='.catalog-pending-', dir=root.parent))

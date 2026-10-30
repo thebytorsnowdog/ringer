@@ -150,9 +150,9 @@ billing route or service tier.
 An authorised Astra subscription selection still depends on observed ChatGPT
 authentication and quota at each run. Use standard service and record the
 selected effort explicitly, so a host's high effort is not inherited. There
-is no automatic paid fallback or top-up. Current API caps are £0, alongside
-the shared £90 subscription fee. The earlier job-specific Astra subscription
-fit-assessment permission is historical and superseded by the subscription
+is no automatic paid fallback or top-up. The example policy sets the monthly
+API cap to £0. Record any subscription fee in your local cost policy. The earlier
+job-specific Astra subscription fit-assessment permission is historical and superseded by the subscription
 priority above. If access, authority or evidence is missing, stop with
 `BLOCKED`. Assignments remain provisional.
 

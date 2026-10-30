@@ -69,6 +69,30 @@ class WorkerWritePreflightTests(unittest.TestCase):
         self.assertEqual((None, ""), preflight_local(task, self.taskdir))
         self.assertEqual([], list(source.glob(".ringer-write-probe-*")))
 
+    def test_sandbox_bypass_is_rejected_without_write_paths(self):
+        failure, message = preflight_local(
+            self.contract(
+                [],
+                ["codex", "exec", "--sandbox", "workspace-write", "--dangerously-bypass-approvals-and-sandbox"],
+            ),
+            self.taskdir,
+        )
+        self.assertEqual("permission", failure)
+        self.assertIn("requires full_access", message)
+
+    def test_sandbox_bypass_remains_allowed_when_codex_is_not_restricted(self):
+        self.assertEqual(
+            (None, ""),
+            preflight_local(
+                self.contract(
+                    [],
+                    ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
+                    restricted=False,
+                ),
+                self.taskdir,
+            ),
+        )
+
     def test_taskdir_write_path_requires_workspace_write_mode(self):
         failure, message = preflight_local(
             self.contract(

@@ -32,7 +32,7 @@ Do not use this for judgment-heavy refactors, cross-file architecture changes, o
 
 ## Checks
 
-The check runs `git add -A && git diff --cached > {{EXPORT_DIR}}/{{MIGRATION_KEY}}.patch`, then runs `checks/migration_patch_check.py`.
+The check stages with `git add -A` while excluding the Claude engine `.runtime/` tree, writes `git diff --cached` to `{{EXPORT_DIR}}/{{MIGRATION_KEY}}.patch`, then runs `checks/migration_patch_check.py`. `.runtime/` is engine session state and must not be exported.
 
 The script fails loudly if the patch is empty, if any staged file is outside the task's owned set, or if ignored files under the owned paths would be lost. When `{{GITIGNORED_EXPORTS}}` is `AUTO` or a path list, the script copies those ignored files into `{{EXPORT_DIR}}/{{MIGRATION_KEY}}-gitignored/` and verifies the copies exist.
 

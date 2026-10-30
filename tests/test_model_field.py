@@ -121,6 +121,42 @@ class ModelPlaceholderTests(unittest.TestCase):
             cmd,
         )
 
+    def test_full_access_false_omits_sandbox_bypass_flag(self) -> None:
+        engine = EngineConfig(
+            name="codex",
+            bin="codex",
+            args_template=(
+                "exec",
+                "{access_args}",
+                "{engine_args}",
+                "{full_access_args}",
+                "{spec}",
+            ),
+            full_access_args=("--dangerously-bypass-approvals-and-sandbox",),
+            sandbox_args=("--sandbox", "workspace-write"),
+            token_regex=None,
+        )
+        blocked = build_worker_command(
+            engine,
+            taskdir=Path("/tmp/t"),
+            spec="do it",
+            full_access=False,
+            engine_args=("--dangerously-bypass-approvals-and-sandbox",),
+        )
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", blocked)
+        self.assertIn("--sandbox", blocked)
+        allowed = build_worker_command(
+            engine,
+            taskdir=Path("/tmp/t"),
+            spec="do it",
+            full_access=True,
+            engine_args=("--dangerously-bypass-approvals-and-sandbox",),
+        )
+        self.assertEqual(
+            3,
+            allowed.count("--dangerously-bypass-approvals-and-sandbox"),
+        )
+
     def test_model_args_expands_to_nothing_without_resolved_model(self) -> None:
         engine = EngineConfig(
             name="codex",

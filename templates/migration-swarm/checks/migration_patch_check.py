@@ -36,6 +36,11 @@ def normalize(path: str) -> str:
     return path.strip().strip("/").replace("\\", "/")
 
 
+def is_runtime_export_path(path: str) -> bool:
+    """True for the Claude engine `.runtime/` tree, which must not be exported."""
+    return ".runtime" in normalize(path).split("/")
+
+
 def is_owned(path: str, owned: list[str]) -> bool:
     rel = normalize(path)
     for entry in owned:
@@ -125,6 +130,13 @@ def main() -> int:
         print("FAIL: no staged paths found after git add -A; patch should not be empty")
         return 1
 
+    runtime_staged = [path for path in changed if is_runtime_export_path(path)]
+    if runtime_staged:
+        print("FAIL: refusing to export Claude engine .runtime/ paths:")
+        for path in runtime_staged:
+            print(f"  - {path}")
+        return 1
+
     outside = [path for path in changed if not is_owned(path, owned)]
     if outside:
         print("FAIL: patch touches files outside this task's ownership:")
@@ -135,7 +147,7 @@ def main() -> int:
             print(f"  - {path}")
         return 1
 
-    ignored = ignored_paths_under(owned)
+    ignored = [path for path in ignored_paths_under(owned) if not is_runtime_export_path(path)]
     ignored_mode = args.ignored_exports.strip()
     ignored_export_root = Path(args.export_dir) / f"{args.task_key}-gitignored"
     if ignored and ignored_mode.upper() == "NONE":

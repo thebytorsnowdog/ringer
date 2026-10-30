@@ -111,7 +111,7 @@ with a non-expired `resetsAt`, or billing admission reports `quota`) or
 **mid-run** (when a worker attempt fails with `failure_class == "quota"` /
 `ResourceExhausted` / rate-limit exhaustion)—Ringer automatically reverts the
 task to `engine: "openrouter"` (`billing_route: "api"`, backed by
-`engines/openrouter_worker.py` and `/home/snowy/.config/ringer/openrouter.key`)
+`engines/openrouter_worker.py` and `~/.config/ringer/openrouter.key`)
 so the workflow continues without failing the job.
 
 **Mandatory user notification on fallback:**

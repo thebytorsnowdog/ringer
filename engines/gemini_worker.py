@@ -8,7 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
-DEFAULT_AGY_BIN = "/home/snowy/.local/share/mise/installs/antigravity-cli/latest/agy"
+DEFAULT_AGY_BIN = os.path.expanduser("~/.local/share/mise/installs/antigravity-cli/latest/agy")
 
 EFFORT_LEVEL_MAP: dict[str, str] = {
     "minimal": "low",

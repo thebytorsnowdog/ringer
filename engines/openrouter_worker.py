@@ -8,10 +8,10 @@ import shutil
 import sys
 from pathlib import Path
 
-DEFAULT_CLAUDE_BIN = "/home/snowy/.local/share/mise/installs/claude/latest/claude"
+DEFAULT_CLAUDE_BIN = os.path.expanduser("~/.local/share/mise/installs/claude/latest/claude")
 DEFAULT_KEY_PATHS = (
     ".runtime/openrouter/openrouter.key",
-    "/home/snowy/.config/ringer/openrouter.key",
+    os.path.expanduser("~/.config/ringer/openrouter.key"),
 )
 
 EFFORT_MAP: dict[str, str] = {

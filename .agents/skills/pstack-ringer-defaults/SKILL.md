@@ -28,7 +28,7 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
   - When coordinating from **Claude Code** (retiring 6 November 2026): use `engine: "claude"` (Claude Code subscription worker, e.g. `opus` or `sonnet`).
   - When coordinating from **Codex** (retiring 6 November 2026): use `engine: "codex"` (Codex subscription worker, e.g. `gpt-5.4`).
   - All subscription engines are bwrap-sandboxed with isolated runtime dirs and forward `--effort`.
-  - **Automatic usage-cap fallback to OpenRouter:** If the subscription engine hits its usage cap (either pre-dispatch via `~/.local/state/omarchy/agents/usage/<agent>.json` at `percent >= 1.0` with a future `resetsAt`, or mid-run when `failure_class == "quota"`), Ringer automatically reverts the task to `engine: "openrouter"` (`billing_route: "api"`, authenticated via `/home/snowy/.config/ringer/openrouter.key`) so the work continues without stopping. Ringer emits a stderr notice, a run summary section, a `quota_fallback` lifecycle event + HUD state badge, and an Omarchy desktop notification (`notify-send`), and **the coordinator must explicitly inform the user in its response** that the subscription usage cap was reached and work continued on OpenRouter.
+  - **Automatic usage-cap fallback to OpenRouter:** If the subscription engine hits its usage cap (either pre-dispatch via `~/.local/state/omarchy/agents/usage/<agent>.json` at `percent >= 1.0` with a future `resetsAt`, or mid-run when `failure_class == "quota"`), Ringer automatically reverts the task to `engine: "openrouter"` (`billing_route: "api"`, authenticated via `~/.config/ringer/openrouter.key`) so the work continues without stopping. Ringer emits a stderr notice, a run summary section, a `quota_fallback` lifecycle event + HUD state badge, and an Omarchy desktop notification (`notify-send`), and **the coordinator must explicitly inform the user in its response** that the subscription usage cap was reached and work continued on OpenRouter.
 - **Model-fit assessment before every model job.** Assessment is NOT user approval. Before selecting OpenRouter candidates, review catalogue and task-family evidence; refresh missing or >24h-old assessment with `python3 scripts/assess_openrouter.py --refresh --out ~/.ringer/model-assessment` (see `docs/MODEL-EVALUATION.md`). Catalogue compatibility does not prove quality. Exploration is optional. Global promotion requires 30 distinct jobs per family, 75% first-try and 85% final-check passes, plus human review.
 - **Judgement panels** (`architect` exploration, `interrogate`, arena cross-judge, picking a base) need model diversity, and their output is a decision, not a checkable artefact. From Antigravity, run them as Ringer `adversarial-review` jobs across the configured subscription workers. Inside Claude Code, pstack's own frontier dispatch is fine.
 - **Arena on code** is split. Candidates are Ringer tasks (same spec, different models, separate worktrees). Judging, picking and grafting stay with the coordinator plus the pstack cross-judge.
@@ -60,8 +60,8 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
 6. Record reusable routing lessons in `docs/MODEL-NOTES.md`.
 7. Pause for force-push, deploys, deletion, customer messages, money and credential changes.
 8. An explicit "do it inline" from Ian wins.
-9. Honour `/home/snowy/.config/ai/CONSTITUTION.md` and `/home/snowy/.config/ai/context.md` across every session, and load `/home/snowy/.config/ai/TELOS.md` on demand when advising on strategy, architecture, communication, or personal/wellbeing decisions.
-10. Standardise all Git commits and GitHub attribution on `user.name = Snowy` and `user.email = 215750096+thebytorsnowdog@users.noreply.github.com` (never `Ian Dunsmore` or a personal email address).
+9. Honour `~/.config/ai/CONSTITUTION.md` and `~/.config/ai/context.md` across every session, and load `~/.config/ai/TELOS.md` on demand when advising on strategy, architecture, communication, or personal/wellbeing decisions.
+10. Standardise all Git commits and GitHub attribution on `user.name = Snowy` and `user.email = 215750096+thebytorsnowdog@users.noreply.github.com` (never a personal real name or personal email address).
 
 ## 5. Host adapters
 
@@ -69,12 +69,12 @@ Antigravity (`engine: "gemini"`) and Grok (`engine: "grok"`) are the primary con
 
 | Host | pstack | Ringer |
 |---|---|---|
-| Antigravity (primary continuing subscription, rules owner) | Read the leaf files under `/home/snowy/.agents/open-pstack`. Panels run as Ringer `adversarial-review` (pstack's launcher needs `bun`, not installed). | `~/.agents/skills/ringer` via shell plus `ringer_nudge_antigravity.py` hook (`engine: "gemini"`) |
-| Grok (primary continuing subscription) | Panellist or worker; read leaf files from `/home/snowy/.agents/open-pstack` when needed | worker and CLI harness (`engine: "grok"`) |
+| Antigravity (primary continuing subscription, rules owner) | Read the leaf files under `~/.agents/open-pstack`. Panels run as Ringer `adversarial-review` (pstack's launcher needs `bun`, not installed). | `~/.agents/skills/ringer` via shell plus `ringer_nudge_antigravity.py` hook (`engine: "gemini"`) |
+| Grok (primary continuing subscription) | Panellist or worker; read leaf files from `~/.agents/open-pstack` when needed | worker and CLI harness (`engine: "grok"`) |
 | Claude Code (retiring 6 November 2026) | Native `/pstack:*` | `~/.claude/skills/ringer` plus hooks (`engine: "claude"`) |
 | Codex (retiring 6 November 2026) | Worker only (no longer a coordinator) | worker engine `codex` |
 | Hermes | `pstack-*` subset installed; read missing ones from the leaf files | via shell |
 | OpenCode | Worker harness; follows its spec, not these rules | n/a |
 
-pstack leaf files: `/home/snowy/.agents/open-pstack/plugins/pstack/skills/<name>/SKILL.md` (`~/.claude/plugins/marketplaces/open-pstack` is retained only as a legacy fallback until 6 November 2026).
+pstack leaf files: `~/.agents/open-pstack/plugins/pstack/skills/<name>/SKILL.md` (`~/.claude/plugins/marketplaces/open-pstack` is retained only as a legacy fallback until 6 November 2026).
 Ringer: `~/Work/GitHub/ringer` (branch `ian`). Load skill `ringer` when orchestrating.

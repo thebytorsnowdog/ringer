@@ -285,7 +285,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 command = enforce_codex_command(command, model, route, spec)
             except ValueError as exc:
                 return blocked(str(exc), "permission")
-        elif engine == "opencode":
+        elif engine in {"opencode", "openrouter"}:
             if route != "api":
                 return blocked("OpenCode requires an explicit API billing route", "permission")
             try:
@@ -296,7 +296,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
             return blocked("billing auth evidence unavailable for this engine", "permission")
         if route == "api" and "run_api_cap_gbp" not in policy:
             return blocked("paid API requires an explicit run_api_cap_gbp", "unknown")
-        if engine == "opencode":
+        if engine in {"opencode", "openrouter"}:
             # An OpenRouter route is always chargeable.  Do not read, infer or
             # alter credentials while deciding whether its local budget permits
             # dispatch.

@@ -40,7 +40,7 @@ LIVE_RUN_RE = re.compile(r"ringer\.py\s+(?:run|ask)\b")
 NON_LIVE_FLAGS = ("--dry-run", "--baseline")
 WORKER_CLI_RE = re.compile(
     r"(?:^|[\s;&|(/])"
-    r"(?:claude\s+(?:-p|--print)|grok\s+(?:-p|--single)|opencode\s+run|codex\s+exec)"
+    r"(?:claude\s+(?:-p|--print)|grok\s+(?:-p|--single)|opencode\s+run|codex\s+exec|gemini\s+(?:-p|--prompt)|agy\s+(?:-p|--print|--prompt))"
     r"(?=\s|$|=|[;&|)])",
 )
 

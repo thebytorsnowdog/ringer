@@ -90,25 +90,44 @@ you intend to act on, and anything whose output a check could execute keep the
 full path. If you could write a check that catches a wrong answer, write it and
 make it a manifest.
 
-## Automatic use and subscription routing
+## Automatic use, originating-harness subscription routing, and OpenRouter usage-cap fallback
 
 Use Ringer whenever the workflow benefits from it, without asking permission
-or requiring model-selection confirmation. The current host (Antigravity by
-default) coordinates specs, checks, routing and review. Codex subscription
-workers remain allowed but are not preferred.
-For complicated tasks prioritise suitable already-authenticated subscription
-models through their native configured harness. Read local configuration and
-observed auth/quota, then choose the exact locally available model and supported
-effort per task. Record explicit `billing_route: subscription` and
-`service_tier: standard` for subscription tasks.
+or requiring model-selection confirmation. The model/harness starting the
+request coordinates specs, checks, routing and review, and **must route Ringer
+worker tasks through its own native subscription engine first**
+(`billing_route: "subscription"`, `service_tier: "standard"`):
+
+- **Gemini / Antigravity host:** `engine: "gemini"` (uses `engines/gemini_worker.py` -> `agy` with Google AI Ultra subscription OAuth; models `gemini-4-argon-low`, `gemini-4-argon-medium`, `gemini-4-argon-high`, `gemini-3.8-flash-low`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-high`).
+- **Claude Code host:** `engine: "claude"` (`opus`, `sonnet`, `haiku`).
+- **Codex host:** `engine: "codex"` (`gpt-5.4` / configured Codex subscription slugs).
+- **Grok host:** `engine: "grok"` (`grok-4.7`).
+- **Hermes host:** use the active subscription engine for the session (`gemini`, `claude`, `codex`, or `grok`).
+
+**Automatic OpenRouter fallback on usage cap:**
+If a subscription task hits a usage cap—either **pre-dispatch** (when
+`~/.local/state/omarchy/agents/usage/<agent>.json` reports `percent >= 1.0`
+with a non-expired `resetsAt`, or billing admission reports `quota`) or
+**mid-run** (when a worker attempt fails with `failure_class == "quota"` /
+`ResourceExhausted` / rate-limit exhaustion)—Ringer automatically reverts the
+task to `engine: "openrouter"` (`billing_route: "api"`, backed by
+`engines/openrouter_worker.py` and `/home/snowy/.config/ringer/openrouter.key`)
+so the workflow continues without failing the job.
+
+**Mandatory user notification on fallback:**
+When fallback triggers, Ringer records `quota_fallback` in the run state JSON
+and `lifecycle.jsonl`, prints a `[ringer.py] USAGE CAP FALLBACK` banner and
+summary section, and sends a desktop notification (`notify-send`). The
+coordinating agent **must also explicitly tell the user in its response**
+which task(s) hit the subscription usage cap and which OpenRouter model was
+used to complete the work.
 
 Choices within existing authority are coordinator decisions. Ask only for
 genuinely missing authority. Preserve executable checks, sandbox confinement,
 source integrity, raw logs and artifact-bound human review receipts. Model-fit
 assessment is required before dispatch; assessment is NOT user approval.
-No silent paid API or Fast fallback, top-up, credential change or budget-cap
-change is authorised by this policy. Honour an explicit inline request;
-otherwise a single delegated task is a one-task manifest.
+Honour an explicit inline request; otherwise a single delegated task is a
+one-task manifest.
 
 This policy supersedes historical OpenRouter-first/OpenCode-only routing,
 no-Codex-worker rules and job-specific subscription restrictions. Historical

@@ -50,9 +50,11 @@ from ringer_routing import (
 )
 
 from ringer_reliability import (
-    LifecycleJournal, TERMINAL_STATUSES, classify_failure,
+    LifecycleJournal, OPENROUTER_FALLBACK_ENGINES, SUBSCRIPTION_ENGINES,
+    TERMINAL_STATUSES, check_subscription_quota_cap, classify_failure,
     read_export_evidence, read_outcomes, reliability_fields, run_bounded,
-    sha256_file, should_retry, stop_process_tree, summarise_outcomes,
+    select_openrouter_fallback_model, sha256_file, should_retry,
+    stop_process_tree, summarise_outcomes,
 )
 from dataclasses import asdict, dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
@@ -2325,6 +2327,7 @@ class TaskRuntime:
     admission: Admission | None = None
     prepared_command: tuple[list[str], str] | None = None
     model_assessment: dict[str, str] | None = None
+    quota_fallback: dict[str, Any] | None = None
 
     def evidence_level(self) -> str:
         if self.product_state != "UNKNOWN":
@@ -2524,6 +2527,11 @@ class StateWriter:
                     "model_assessment": (
                         dict(runtime.model_assessment)
                         if runtime.model_assessment is not None
+                        else None
+                    ),
+                    "quota_fallback": (
+                        dict(runtime.quota_fallback)
+                        if runtime.quota_fallback is not None
                         else None
                     ),
                     "attempt_index": runtime.attempts,
@@ -9138,6 +9146,11 @@ class RingerRunner:
                 if runtime.model_assessment is not None
                 else None
             ),
+            quota_fallback=(
+                dict(runtime.quota_fallback)
+                if runtime.quota_fallback is not None
+                else None
+            ),
         )
 
     def _event(self, runtime: TaskRuntime, event: str) -> None:
@@ -9252,6 +9265,147 @@ class RingerRunner:
             return failure, output
         return None, ""
 
+    def _is_subscription_task(self, task: TaskSpec) -> bool:
+        if task.engine in OPENROUTER_FALLBACK_ENGINES or task.billing_route == "api":
+            return False
+        return task.billing_route == "subscription" or task.engine in SUBSCRIPTION_ENGINES
+
+    def _resolve_openrouter_fallback_engine(self) -> str | None:
+        for name in OPENROUTER_FALLBACK_ENGINES:
+            engine = self.config.engines.get(name)
+            if engine is None:
+                continue
+            if "/" in engine.bin and not Path(engine.bin).is_file():
+                continue
+            if "/" not in engine.bin and not shutil.which(engine.bin):
+                continue
+            return name
+        return None
+
+    def _usage_dir_for_quota_check(self) -> Path | None:
+        override = (os.environ.get("RINGER_USAGE_DIR") or "").strip()
+        if override:
+            return Path(override).expanduser()
+        local_usage = self.config.state_dir / "usage"
+        if local_usage.is_dir():
+            return local_usage
+        try:
+            if self.config.state_dir.resolve() == default_state_dir().resolve():
+                return Path.home() / ".local" / "state" / "omarchy" / "agents" / "usage"
+        except OSError:
+            pass
+        return None
+
+    def _activate_quota_fallback(
+        self,
+        runtime: TaskRuntime,
+        *,
+        reason: str,
+        trigger: str,
+        current_spec: str,
+    ) -> bool:
+        if runtime.quota_fallback is not None or not self._is_subscription_task(runtime.task):
+            return False
+        fallback_engine = self._resolve_openrouter_fallback_engine()
+        if fallback_engine is None:
+            return False
+        if self.config.billing_policy_path is not None:
+            try:
+                policy = json.loads(self.config.billing_policy_path.read_text(encoding="utf-8"))
+                if not isinstance(policy, dict) or not policy.get("automatic_paid_fallback", False):
+                    return False
+            except (OSError, ValueError):
+                return False
+        original_engine = runtime.task.engine
+        original_engine_cfg = self.config.engines.get(original_engine)
+        original_model = resolved_task_model(
+            runtime.task, original_engine_cfg, runtime.last_worker_command
+        ) or runtime.task.model or (original_engine_cfg.model_default if original_engine_cfg else original_engine)
+        effort = (runtime.model_assessment or {}).get("effort", "medium")
+        fallback_cfg = self.config.engines[fallback_engine]
+        fallback_model = select_openrouter_fallback_model(
+            runtime.task,
+            effort=effort,
+            state_dir=self.config.state_dir,
+            default_model=fallback_cfg.model_default or "openrouter/z-ai/glm-5.3-flash",
+        )
+        fallback_info = {
+            "triggered": True,
+            "trigger": trigger,
+            "original_engine": original_engine,
+            "original_model": original_model,
+            "fallback_engine": fallback_engine,
+            "fallback_model": fallback_model,
+            "reason": reason,
+            "triggered_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self.lock:
+            runtime.quota_fallback = fallback_info
+            runtime.task = dataclass_replace(
+                runtime.task,
+                engine=fallback_engine,
+                model=fallback_model,
+                billing_route="api",
+            )
+            if runtime.model_assessment is not None:
+                runtime.model_assessment = {
+                    **runtime.model_assessment,
+                    "engine": fallback_engine,
+                    "model": fallback_model,
+                    "billing_route": "api",
+                    "fallback_from_engine": original_engine,
+                    "fallback_from_model": original_model,
+                    "fallback_reason": reason,
+                }
+        runtime.prepared_command = self._prepare_worker_command(runtime, current_spec)
+        notice = (
+            f"[ringer.py] USAGE CAP FALLBACK: task {runtime.task.key} on "
+            f"{original_engine}/{original_model} hit subscription usage cap ({reason}); "
+            f"reverting to OpenRouter ({fallback_engine}/{fallback_model}) so work can continue."
+        )
+        append_text(runtime.log_path, notice + "\n")
+        print(notice, file=sys.stderr, flush=True)
+        self._event(runtime, "quota_fallback")
+        self._send_desktop_fallback_notification(runtime.task.key, fallback_info)
+        return True
+
+    def _send_desktop_fallback_notification(self, task_key: str, info: dict[str, Any]) -> None:
+        if os.environ.get("RINGER_NO_NOTIFY") == "1":
+            return
+        notify_cmd = (os.environ.get("RINGER_NOTIFY_CMD") or "").strip()
+        if not notify_cmd:
+            try:
+                if self.config.state_dir.resolve() != default_state_dir().resolve():
+                    return
+            except OSError:
+                return
+            notify_cmd = shutil.which("notify-send") or ""
+        if not notify_cmd:
+            return
+        title = "Ringer: Subscription Usage Cap Hit"
+        body = (
+            f"Task '{task_key}' on {info['original_engine']} ({info['original_model']}) "
+            f"hit its usage cap ({info['reason']}). Continuing via OpenRouter ({info['fallback_model']})."
+        )
+        with contextlib.suppress(Exception):
+            if (os.environ.get("RINGER_NOTIFY_CMD") or "").strip():
+                subprocess.run(
+                    [notify_cmd, "-a", "Ringer", "-u", "normal", title, body],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                    check=False,
+                )
+            else:
+                subprocess.Popen(
+                    [notify_cmd, "-a", "Ringer", "-u", "normal", title, body],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+
     async def _execute_task(self, runtime: TaskRuntime) -> None:
         async with self.semaphore:
             runtime.started_at_monotonic = time.monotonic()
@@ -9266,7 +9420,22 @@ class RingerRunner:
                 return
             runtime.preflight_state = "PASS"
             current_spec = runtime.task.spec
-            for attempt in range(1, runtime.task.max_attempts + 1):
+            if self._is_subscription_task(runtime.task):
+                capped, cap_reason = check_subscription_quota_cap(
+                    runtime.task.engine,
+                    runtime.task.model,
+                    usage_dir=self._usage_dir_for_quota_check(),
+                )
+                if capped:
+                    self._activate_quota_fallback(
+                        runtime,
+                        reason=cap_reason,
+                        trigger="pre_dispatch",
+                        current_spec=current_spec,
+                    )
+            attempt = 1
+            max_attempts = runtime.task.max_attempts
+            while attempt <= max_attempts:
                 if self.config.billing_policy_path is None:
                     runtime.billing = dict(billing_route=runtime.task.billing_route, billing_status="DISABLED")
                 # The preflight already prepared attempt 1 from the original
@@ -9291,6 +9460,13 @@ class RingerRunner:
                         timeout_s=min(10, runtime.task.preflight_timeout_s))
                     runtime.billing = runtime.admission.evidence
                     if not runtime.admission.allowed:
+                        if runtime.billing.get("billing_failure_class") == "quota" and self._activate_quota_fallback(
+                            runtime,
+                            reason=str(runtime.billing.get("billing_reason") or "subscription quota exhausted"),
+                            trigger="pre_dispatch",
+                            current_spec=current_spec,
+                        ):
+                            continue
                         runtime.failure_class = runtime.billing["billing_failure_class"]
                         runtime.setup_error = runtime.billing["billing_reason"]
                         self._event(runtime, "billing_blocked")
@@ -9363,9 +9539,19 @@ class RingerRunner:
                         runtime.deliverable_notes.append(f"worktree cleanup failed: {exc}")
                         append_text(runtime.log_path, f"[ringer.py] worktree cleanup failed: {exc}\n")
                     return
+                if runtime.failure_class == "quota" and self._activate_quota_fallback(
+                    runtime,
+                    reason="subscription usage cap or rate limit hit during worker attempt",
+                    trigger="mid_run",
+                    current_spec=current_spec,
+                ):
+                    max_attempts = max(max_attempts, attempt + 1)
+                    attempt += 1
+                    continue
                 if should_retry(runtime.failure_class, runtime.task, attempt, verdict):
                     failure_context = build_failure_context(runtime.log_path, verify.raw_output_excerpt)
                     current_spec = f"{runtime.task.spec}\n\nPrevious attempt failed: {failure_context}. Fix it."
+                    attempt += 1
                     continue
                 self._terminal(runtime, "blocked" if runtime.failure_class in {"quota", "permission"} else "fail", verdict)
                 return
@@ -11116,6 +11302,16 @@ def print_summary(run_id: str, runtimes: list[TaskRuntime]) -> None:
         print("\nretry admission blocked (earlier attempts retained):")
         for runtime in billing_blocks:
             print(f"  {runtime.task.key}: {runtime.setup_error}")
+    fallbacks = [r for r in runtimes if r.quota_fallback]
+    if fallbacks:
+        print("\nusage cap fallbacks (reverted to OpenRouter):")
+        for runtime in fallbacks:
+            info = runtime.quota_fallback or {}
+            print(
+                f"  {runtime.task.key}: {info.get('original_engine')}/{info.get('original_model')} "
+                f"-> {info.get('fallback_engine')}/{info.get('fallback_model')} "
+                f"({info.get('trigger')}: {info.get('reason')})"
+            )
 
 
 def create_demo_manifest(assessment_path: Path | None = None) -> Path:

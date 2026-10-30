@@ -23,6 +23,14 @@ FAILURE_CLASSES = frozenset({"product", "checker_timeout", "worker_timeout", "mi
                              "interrupted", "unknown"})
 NEVER_RETRY = frozenset({"quota", "permission", "interrupted"})
 TERMINAL_STATUSES = frozenset({"pass", "fail", "blocked", "interrupted", "not_started"})
+SUBSCRIPTION_ENGINES = frozenset({"gemini", "claude", "codex", "grok"})
+OPENROUTER_FALLBACK_ENGINES = ("openrouter", "opencode")
+USAGE_AGENT_FILES: dict[str, tuple[str, ...]] = {
+    "gemini": ("antigravity.json", "gemini.json"),
+    "claude": ("claude.json",),
+    "codex": ("codex.json",),
+    "grok": ("grok.json",),
+}
 
 
 def reliability_fields(obj: dict[str, Any], key: str) -> dict[str, Any]:
@@ -68,6 +76,13 @@ def sha256_file(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+_QUOTA_MESSAGE_RE = re.compile(
+    r"(?:insufficient[_ ]quota|quota exceeded|usage limit(?: exceeded| reached)?|"
+    r"usage cap(?: reached| hit)?|hit your (?:usage )?limit|rate[_ ]limit(?: exceeded)?|"
+    r"too many requests|resource[_ ]?exhausted|429|insufficient credits|credit balance)"
+)
+
+
 def _structured_provider_failure(text: str) -> str | None:
     """Read standalone provider error envelopes, never JSON quoted in prose."""
     for line in text.splitlines():
@@ -75,21 +90,32 @@ def _structured_provider_failure(text: str) -> str | None:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(event, dict) or event.get("type") != "error" or not isinstance(event.get("error"), dict):
+        if not isinstance(event, dict):
             continue
-        error = event["error"]
+        event_type = str(event.get("type") or event.get("event") or "").lower()
+        error: dict[str, Any] | None = None
+        if event_type == "error" and isinstance(event.get("error"), dict):
+            error = event["error"]
+        elif event_type == "result" and event.get("is_error") is True:
+            error = {"type": str(event.get("subtype") or ""), "message": str(event.get("result") or "")}
+        elif event_type == "result" and isinstance(event.get("result"), dict):
+            res_obj = event["result"]
+            if str(res_obj.get("status") or "").upper() in {"ERROR", "FAILED"}:
+                error = {"type": str(res_obj.get("status") or ""), "message": str(res_obj.get("error") or res_obj.get("response") or "")}
+        if error is None:
+            continue
         kind = str(error.get("type", "")).lower()
         message = str(error.get("message", "")).lower()
-        if kind in {"insufficient_quota", "quota_exceeded", "rate_limit_exceeded"}:
+        if kind in {"insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "resource_exhausted"}:
             return "quota"
         if kind in {"permission_denied", "unauthorized", "forbidden", "authentication_error"}:
             return "permission"
+        if _QUOTA_MESSAGE_RE.search(message.strip()):
+            return "quota"
         if kind in {"provider_error", "api_error", "service_unavailable"}:
             return "provider/runtime"
         # A real error envelope may use a generic type, but its error message is
         # still diagnostic context, unlike arbitrary worker prose.
-        if re.fullmatch(r"(?:insufficient quota|quota exceeded|usage limit|rate limit|too many requests|429|insufficient credits|credit balance)", message.strip()):
-            return "quota"
         if re.fullmatch(r"(?:permission denied|operation not permitted|unauthorized|forbidden|authentication required)", message.strip()):
             return "permission"
     return None
@@ -98,13 +124,135 @@ def _structured_provider_failure(text: str) -> str | None:
 def _plain_diagnostic_failure(text: str) -> str | None:
     """Classify complete diagnostic lines, not source snippets or conversational prose."""
     prefix = r"(?:(?:error|fatal|provider error|api error)\s*:\s*|[a-z_]*error\s*:\s*)?"
+    explicit_err_prefix = r"(?:(?:error|fatal|provider error|api error|[a-z_]*error|resource_?exhausted)\s*:\s*)+"
     for line in text.splitlines():
         value = line.strip().lower()
-        if re.fullmatch(prefix + r"(?:insufficient_quota|quota exceeded|usage limit|rate limit|too many requests|429|insufficient credits|credit balance)", value):
+        if re.fullmatch(
+            prefix
+            + r"(?:insufficient_quota|insufficient quota|quota exceeded|usage limit(?: exceeded| reached)?|"
+            r"usage cap(?: reached| hit)?|you(?:'ve| have) hit your (?:usage )?limit.*|"
+            r"rate limit(?: exceeded)?|resource_exhausted|resourceexhausted|"
+            r"too many requests|429|insufficient credits|credit balance)",
+            value,
+        ):
+            return "quota"
+        if re.fullmatch(
+            explicit_err_prefix
+            + r".*(?:insufficient[_ ]quota|quota exceeded|usage limit|usage cap|rate limit|"
+            r"resource[_ ]?exhausted|exhausted your capacity|too many requests|insufficient credits|credit balance).*",
+            value,
+        ):
             return "quota"
         if re.fullmatch(prefix + r"(?:permission denied|operation not permitted|allow_full_access is false|unauthorized|forbidden|authentication required)", value):
             return "permission"
     return None
+
+
+def check_subscription_quota_cap(
+    engine: str,
+    model: str = "",
+    *,
+    usage_dir: Path | None = None,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """Inspect Omarchy agent usage state files for a 100% subscription usage cap."""
+    clean_engine = (engine or "").strip().lower()
+    filenames = USAGE_AGENT_FILES.get(clean_engine)
+    if not filenames or usage_dir is None or not usage_dir.is_dir():
+        return False, ""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    clean_model = (model or "").strip().lower()
+    for filename in filenames:
+        path = usage_dir / filename
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        limits = data.get("limits") if isinstance(data.get("limits"), list) else data.get("windows")
+        if not isinstance(limits, list):
+            continue
+        for item in limits:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("title") or "Usage window").strip()
+            if clean_engine == "gemini":
+                lower_label = label.lower()
+                is_non_gemini_model = "claude" in clean_model or "gpt-oss" in clean_model
+                if is_non_gemini_model and lower_label.startswith("gemini pool"):
+                    continue
+                if not is_non_gemini_model and lower_label.startswith("non-gemini pool"):
+                    continue
+            percent = item.get("percent")
+            if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not math.isfinite(percent):
+                continue
+            if percent < 1.0:
+                continue
+            resets_at = str(item.get("resetsAt") or "").strip()
+            if resets_at:
+                try:
+                    reset_dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+                    if reset_dt.tzinfo is None:
+                        reset_dt = reset_dt.replace(tzinfo=timezone.utc)
+                    if reset_dt <= current:
+                        continue
+                except ValueError:
+                    pass
+            pct_display = int(round(percent * 100)) if percent <= 10.0 else int(round(percent))
+            suffix = f" (resets {resets_at})" if resets_at else ""
+            return True, f"{label} at {pct_display}%{suffix}"
+    return False, ""
+
+
+def select_openrouter_fallback_model(
+    task: Any,
+    *,
+    effort: str = "",
+    state_dir: Path | None = None,
+    default_model: str = "openrouter/z-ai/glm-5.3-flash",
+) -> str:
+    """Choose the OpenRouter fallback model for a capped subscription task."""
+    override = (os.environ.get("RINGER_OPENROUTER_FALLBACK_MODEL") or "").strip()
+    if override:
+        return override if override.startswith("openrouter/") else f"openrouter/{override}"
+    clean_effort = (effort or "").strip().lower()
+    task_type = str(getattr(task, "task_type", "") or "").strip().lower()
+    if clean_effort in {"minimal", "low"} or task_type in {"probe", "smoke"}:
+        preferred = (
+            "z-ai/glm-5.3-flash",
+            "z-ai/glm-5.3",
+            "moonshotai/kimi-k2.7-code",
+        )
+    else:
+        preferred = (
+            "z-ai/glm-5.3",
+            "moonshotai/kimi-k2.7-code",
+            "z-ai/glm-5.3-flash",
+        )
+    if state_dir is not None:
+        assessment_path = state_dir / "model-assessment" / "assessment.json"
+        if assessment_path.is_file():
+            try:
+                report = json.loads(assessment_path.read_text(encoding="utf-8"))
+                candidates = report.get("role_candidates", {}).get("agentic_coding", [])
+                if isinstance(candidates, list) and candidates:
+                    eligible_ids = {
+                        str(entry.get("id")).strip()
+                        for entry in candidates
+                        if isinstance(entry, dict) and entry.get("id")
+                    }
+                    for candidate in preferred:
+                        if candidate in eligible_ids:
+                            return f"openrouter/{candidate}"
+            except (OSError, ValueError):
+                pass
+    chosen = preferred[0] if preferred else default_model.removeprefix("openrouter/")
+    return chosen if chosen.startswith("openrouter/") else f"openrouter/{chosen}"
 
 
 def classify_failure(worker: Any, verify: Any, *, worker_output: str = "", export_error: bool = False) -> str | None:

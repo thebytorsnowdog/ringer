@@ -393,3 +393,7 @@ Evidence: ~/Work/GitHub/hermes-operational-audit-2026-10-16/benefit-update/FINAL
 ## 2026-10-27 corporate presentation formatter
 
 - Codex gpt-6.1-sol high passed two structural implementation/repair gates, but coordinator rendering caught invented textbox borders, undersized content, low-contrast icons and a false footer. A bounded Sol medium correction passed cumulative content, geometry, contrast and DrawingML-order checks. For template-conversion jobs, require real rendered acceptance alongside XML preservation; worker passes alone did not establish the requested visual match. Three tasks are rounds of one job, not promotion evidence. Final source and receipts: `~/Work/GitHub/sw-presentation-formatter/v2-run/final-corrections` and `v2-verification.json`; no commits or pushes.
+
+## 2026-11-08 repository integration evidence
+
+- Codex gpt-6.1-sol medium/high resolved isolated dependency and upstream-merge tasks. Linked worktree source access did not include the external Git index, so the coordinator staged the reviewed resolutions. One independent checker lacked the worker's temporary CMake PATH; repeating that checker with the same tool passed. A full historical diff included 200 MB of upstream binary assets and exceeded the 20 MB export limit; a diff against current upstream kept the custom changes reviewable. A restored file passed runtime tests while its deletion remained staged: final index read-back was necessary before committing. These observations are one job, not model-promotion evidence or a routing-policy change.

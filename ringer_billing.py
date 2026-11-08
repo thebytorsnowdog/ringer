@@ -17,6 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from ringer_capabilities import subscription_probe
 from ringer_costs import SpendLedger, billing_preflight, estimate_event, parse_usage_lines, validate_cost_policy
 from ringer_delegation import prepare_openrouter_dispatch
 
@@ -306,6 +307,15 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 command = enforce_opencode_command(command, model, spec)
             except ValueError as exc:
                 return blocked(str(exc), "permission")
+        elif engine in {"grok", "gemini", "claude"} and route in {None, "subscription"}:
+            probe = subscription_probe(engine)
+            evidence.update(
+                billing_route="subscription",
+                billing_status="UNPROBED",
+                billing_reason=probe.reason + " Native route runs. No API reservation is created.",
+                reservation_status="not_applicable",
+            )
+            return Admission(True, evidence, policy), command
         else:
             return blocked("billing auth evidence unavailable for this engine", "permission")
         if route == "api" and "run_api_cap_gbp" not in policy:

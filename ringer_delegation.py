@@ -291,8 +291,12 @@ def prepare_openrouter_dispatch(
     narrowed["run_api_cap_gbp"] = str(run_cap)
     return DelegationDecision(
         False,
-        "OpenCode 2.2.6 run help lists -m provider/model#variant, --format, --auto, and --standalone. "
-        "It does not list a token, output, or tool-call ceiling. "
+        "OpenCode 2.2.6 tag dc2ffcf sets agent steps and sends model limit.output as "
+        "max_tokens or max_completion_tokens on a primary request. "
+        "The same source retries a provider call up to 10 times, continues a length finish "
+        "up to three times inside one step, and omits maxTokens on the title request. "
+        "The seatbelt profile can write ~/.config/opencode, so a task-local steps or output "
+        "value is not a fixed ceiling. "
         f"£{estimate} is an estimate, not a provider hard cap, so this attempt is not dispatched.",
         "permission",
         complexity,

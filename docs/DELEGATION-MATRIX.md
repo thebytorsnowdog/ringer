@@ -35,7 +35,17 @@ Aliases `z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash` map to the `open
 
 The conservative figure is rounded up to 0.0001 GBP: input tokens times the input price, plus output tokens times the output price, times a USD-to-GBP rate. The default inputs are 200,000 input tokens and 64,000 output tokens when the task does not name a smaller budget. That figure is a policy estimate, not a measured bill and not a provider hard cap.
 
-OpenCode 2.2.6 `run --help` lists `-m provider/model#variant`, `--format default|json`, `--auto`, and `--standalone`. It does not list `--variant`, `--dir`, or a token, output, or tool-call ceiling. No variant name is confirmed, so Ringer does not append `#medium`. Because the CLI can tool-loop past the estimate, paid dispatch is refused before a reservation and before a worker starts. The £0.25, £1, and £10 ceilings remain the approval bounds for any later bounded call.
+OpenCode 2.2.6 `run --help` lists `-m provider/model#variant`, `--format default|json`, `--auto`, and `--standalone`. It does not list `--variant` or `--dir`. No variant name is confirmed, so Ringer does not append `#medium`. Help text is not the whole control surface. The tagged source `anomalyco/opencode` `v2.2.6` (`dc2ffcf`, 2026-11-06) also has these controls:
+
+| Control | Where | What it bounds |
+|---|---|---|
+| `agents.*.steps` | Agents doc and `packages/core/src/session/runner/llm.ts` | Primary model steps. On the last step tools are removed. |
+| `limit.output` | `packages/core/src/session/model-request.ts` `outputLimit` | Primary and compaction `maxTokens`, clamped to 256000. `packages/ai/src/protocols/openai-chat.ts` writes that value as `max_tokens` or `max_completion_tokens`. |
+| Provider retry | `packages/core/src/model-retry.ts` | Hardcoded `Schedule.recurs(10)`. No config field sets it to zero. |
+| Length continuation | `llm.ts` `CONTINUE_AFTER_OUTPUT_LIMIT` | Up to three `finish: length` responses inside one step, then the step fails. |
+| Title call | `packages/core/src/session/title.ts` and `selectTitle` | A second call on an untitled session. Its request options are empty, so `maxTokens` is not set. |
+
+`opencode run` also waits for background subagents with no time limit (v2.2.6 changelog, #60699). `engines/opencode-sandboxed.sh` allows writes under `~/.config/opencode`, so the worker can replace a steps or output setting before the next step. The runner re-reads agents on each step. A task-local config file does not survive that write. Paid dispatch stays refused before a reservation and before a worker starts. The £0.25, £1, and £10 ceilings stay the approval bounds. They are not softened into the estimate.
 
 The rate must be dated and no older than 14 days. A rate dated 2026-09-02 is stale on 2026-11-08. The authorised refresh is the ECB daily euro foreign-exchange feed, no API key:
 
@@ -47,4 +57,4 @@ The approved ceilings bind even if a policy file names a higher cap: £10 in a m
 
 ## What this does not make operational
 
-The Mac checkout has no `opencode` or `claude` binary. The OpenCode wrapper path in config remains valid, and preflight still stops that route while `opencode` is absent. Ringer does not install it and does not read `~/.local/share/opencode/auth.json`. A later install can reuse a credential OpenCode already has there. Codex subscription auth cannot stand in for that route.
+Homebrew OpenCode 2.2.6 is installed on the Mac. The same release is installed on the ThinkPad and the mini through the existing mise shims, and those two trees were not updated or reconfigured. Auth state was not read. That is not a claim that a login is absent. Ringer does not read `auth.json` or the keyring. Codex subscription auth cannot stand in for the OpenRouter route. The paid shortlist stays undispatched until a control bounds output, retries, title generation, and a config file the worker cannot rewrite.

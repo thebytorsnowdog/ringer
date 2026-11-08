@@ -22,12 +22,22 @@ through the native subscription harness that actually supports the provider
 (`billing_route: "subscription"`, `service_tier: "standard"`):
 
 - **Codex host, OpenAI models:** `engine: "codex"`. Subscription auth is ChatGPT login (`forced_login_method="chatgpt"`, account type `chatgpt`). That is separate from an OpenAI API key and from OpenAI API credit balance. An API task sets `billing_route: "api"` and needs observed `api_key` auth.
-- **Grok host, xAI models:** `engine: "grok"` after `grok login` on a SuperGrok or X Premium Plus plan. That OAuth session does not authenticate OpenAI, Gemini, or OpenRouter. With a billing policy loaded, the task stops: the published CLI reference has no headless status that separates that login from an `XAI_API_KEY` session, and Ringer does not read `~/.grok/auth.json` or treat `grok models` exit 0 as subscription evidence.
-- **Gemini / Antigravity host, Google models:** `engine: "gemini"` via `engines/gemini_worker.py`, which execs `agy` and removes `GEMINI_API_KEY` and `GOOGLE_API_KEY`. The `gemini` binary is not this harness. With a billing policy loaded, the task stops: documented sign-in is the OS keyring or an interactive browser flow, and there is no headless auth-status command. The keyring is not read.
+- **Grok host, xAI models:** `engine: "grok"` after `grok login` on a SuperGrok or X Premium Plus plan. That OAuth session does not authenticate OpenAI, Gemini, or OpenRouter. A loaded billing policy does not stop this native route and does not reserve API spend. The published CLI reference has no headless status that separates that login from an `XAI_API_KEY` session. Ringer does not read `~/.grok/auth.json` or treat `grok models` exit 0 as subscription evidence. Auth state stays unprobed.
+- **Gemini / Antigravity host, Google models:** `engine: "gemini"` via `engines/gemini_worker.py`, which execs `agy` and removes `GEMINI_API_KEY` and `GOOGLE_API_KEY`. The `gemini` binary is not this harness. A loaded billing policy does not stop this native route and does not reserve API spend. Documented sign-in is the OS keyring or an interactive browser flow, and there is no headless auth-status command. The keyring is not read. Auth state stays unprobed.
 - **Claude Code host, Anthropic models:** `engine: "claude"`.
 - **Hermes host:** use the subscription engine for the provider in play (`codex`, `grok`, `gemini`, or `claude`).
 
 OpenCode is not required for those routes. A Codex run does not look for `opencode`.
+
+## Coordinator rule discovery
+
+The Mac apply projected the canonical `.agents/skills/ringer` text into two existing directories: `~/.codex/skills/ringer` and `~/.agents/skills/ringer`. That is the home skill projection. It does not establish that every coordinator loaded those files.
+
+Grok rule discovery cannot be claimed from that projection. The inventory found `~/.grok` with no skills directory. Nothing in this repository shows that the Grok CLI reads `~/.agents/skills` or `~/AGENTS.md`. A grok binary and a `grok models` exit do not show that the updated skill was loaded, and they are not subscription evidence. `~/.grok/auth.json` is not read. Auth state is unknown.
+
+Antigravity rule discovery cannot be claimed from that projection. No Antigravity or Gemini skill directory was written. `engines/gemini_worker.py` execs `agy` and removes `GEMINI_API_KEY` and `GOOGLE_API_KEY`. The documented sign-in is the OS keyring or an interactive browser flow, and the command list has no headless auth-status. The keyring is not read. Auth state is unknown. That is not a claim that the user is logged out, and it is not a claim that `agy` loaded the Ringer skill.
+
+`~/.claude` was not present for a skill projection. `pstack-ringer-defaults` was left in place. `~/AGENTS.md` and `~/.codex/AGENTS.md` were already telling harnesses to route through Ringer, and those files were not rewritten.
 
 **No automatic OpenRouter fallback.** A usage cap, missing CLI, auth failure, or provider error stops that route. Ringer does not rewrite the task onto `openrouter` or `opencode`, does not reserve OpenRouter spend, and does not treat `automatic_paid_fallback` or a budget cap as approval. OpenRouter runs only when the task names `engine: "opencode"` or `engine: "openrouter"`, a model starting with `openrouter/`, `billing_route: "api"`, and a spend allowance. `engines/opencode-sandboxed.sh` is a wrapper: preflight fails before spend when `opencode` itself is absent, even if the wrapper is executable. Tell the user the route stopped. Do not install a CLI for them.
 

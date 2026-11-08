@@ -165,12 +165,6 @@ class CapabilityMatrixTests(unittest.TestCase):
             assess_explicit_route(engine="gemini", model="gemini-4-argon-medium", billing_route="api"),
             assess_explicit_route(engine="codex", model="gemini-3.8-flash-low", billing_route="subscription"),
             assess_explicit_route(engine="claude", model="opus", billing_route="api"),
-            assess_explicit_route(
-                engine="grok", model="grok-4.7", billing_route="subscription", billing_policy_loaded=True,
-            ),
-            assess_explicit_route(
-                engine="gemini", model="gemini-4-argon-medium", billing_route="subscription", billing_policy_loaded=True,
-            ),
         ]
         for decision in refused:
             with self.subTest(engine=decision.engine, model=decision.model, route=decision.billing_route):
@@ -304,8 +298,10 @@ class CapabilityMatrixTests(unittest.TestCase):
         loaded = assess_explicit_route(
             engine="grok", model="grok-4.7", billing_route="subscription", billing_policy_loaded=True,
         )
-        self.assertEqual("blocked", loaded.status)
+        self.assertEqual("allowed", loaded.status)
+        self.assertEqual("subscription", loaded.billing_route)
         self.assertIn("not subscription evidence", loaded.reason)
+        self.assertIn("No API reservation", loaded.reason)
         self.assertFalse(loaded.spends_openrouter)
 
 
@@ -363,7 +359,8 @@ class DispatchFailureTests(unittest.TestCase):
             "workdir": str(self.root / "work"),
             "tasks": [{
                 "key": "one", "spec": "Write out.txt", "engine": "grok", "model": "grok-4.7",
-                "billing_route": "subscription", "check": "test -s out.txt", "expect_files": ["out.txt"],
+                "billing_route": "subscription", "max_attempts": 1,
+                "check": "test -s out.txt", "expect_files": ["out.txt"],
             }],
         })
         config = self._config({
@@ -380,12 +377,13 @@ class DispatchFailureTests(unittest.TestCase):
         with patch.dict(os.environ, {"XAI_API_KEY": secret}):
             runner = self._run(manifest, config)
         runtime = runner.runtimes[0]
-        self.assertEqual(0, runtime.attempts)
-        self.assertEqual("blocked", runtime.status)
         self.assertEqual("grok", runtime.task.engine)
-        self.assertIn("XAI_API_KEY", runtime.setup_error or "")
-        self.assertNotIn(secret, runtime.setup_error or "")
-        self.assertFalse(self.marker.exists())
+        self.assertGreaterEqual(runtime.attempts, 1)
+        self.assertEqual("UNPROBED", runtime.billing.get("billing_status"))
+        self.assertIn("No API reservation", runtime.billing.get("billing_reason") or "")
+        self.assertNotIn(secret, json.dumps(runtime.billing))
+        self.assertEqual("spawned\n", self.marker.read_text(encoding="utf-8"))
+        self.assertEqual(1, runtime.attempts)
         self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
 
     def test_provider_error_does_not_switch_to_the_configured_openrouter_bin(self) -> None:

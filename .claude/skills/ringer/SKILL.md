@@ -81,14 +81,14 @@ subscription harness that supports the provider (`billing_route: "subscription"`
 `service_tier: "standard"`):
 
 - **Codex host, OpenAI models:** `engine: "codex"`. Subscription auth is ChatGPT login, not an OpenAI API key and not OpenAI API credit balance. API use is a separate `billing_route: "api"` with observed `api_key` auth. Codex does not require OpenCode.
-- **Grok host, xAI models:** `engine: "grok"` via `grok login` OAuth. That session does not authenticate OpenAI, Gemini, or OpenRouter.
-- **Gemini / Antigravity host, Google models:** `engine: "gemini"` (`engines/gemini_worker.py` execs `agy` and strips Gemini API keys). The `gemini` CLI is not this harness.
+- **Grok host, xAI models:** `engine: "grok"` via `grok login` OAuth. That session does not authenticate OpenAI, Gemini, or OpenRouter. A billing policy does not stop this route and does not prove the login.
+- **Gemini / Antigravity host, Google models:** `engine: "gemini"` (`engines/gemini_worker.py` execs `agy` and strips Gemini API keys). The `gemini` CLI is not this harness. A billing policy does not stop this route and does not read the keyring.
 - **Claude Code host, Anthropic models:** `engine: "claude"` (`opus`, `sonnet`, `haiku`).
 - **Hermes host:** use the subscription engine for the provider in play.
 
 **No automatic OpenRouter fallback.** A usage cap, missing binary, auth failure, or provider error stops the route. Do not rewrite the task to `engine: "openrouter"` or `engine: "opencode"`. A cost-policy cap and `automatic_paid_fallback` are not approval to spend.
 
-**Planned GLM/DeepSeek delegation** is a separate choice, recorded in `docs/DELEGATION-MATRIX.md`. Ian approved it at `2026-11-08T21:11:00Z` for the two flash shortlist models only, within £10 in a month, £1 for a swarm run, and £0.25 for one worker task, with no automatic paid retry. Coordinator review stays on the native subscription route. A stale USD-to-GBP rate, a missing `opencode` binary, or the absence of a documented token or tool-call ceiling still refuses dispatch. OpenCode 2.2.6 `run` has no such ceiling, so the £0.25 figure is an estimate and the paid attempt is not started. Do not install the CLI. Do not pass `--variant` or `--dir`; that release does not accept them.
+**Planned GLM/DeepSeek delegation** is a separate choice, recorded in `docs/DELEGATION-MATRIX.md`. Ian approved it at `2026-11-08T21:11:00Z` for the two flash shortlist models only, within £10 in a month, £1 for a swarm run, and £0.25 for one worker task, with no automatic paid retry. Coordinator review stays on the native subscription route. A stale USD-to-GBP rate still refuses dispatch. OpenCode 2.2.6 documents `steps` and `limit.output`, and the tagged source still retries up to 10 times, continues a length finish inside the step, and leaves the title request without `maxTokens`. The sandbox can write `~/.config/opencode`. The £0.25 figure stays an estimate, and the paid attempt is not started. Do not pass `--variant` or `--dir`.
 
 Choices within existing authority are coordinator decisions. Ask only for
 genuinely missing authority. Preserve executable checks, sandbox confinement,

@@ -307,15 +307,14 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 command = enforce_opencode_command(command, model, spec)
             except ValueError as exc:
                 return blocked(str(exc), "permission")
-        elif engine in {"grok", "gemini", "claude"} and route in {None, "subscription"}:
+        elif engine in {"grok", "gemini", "claude"}:
             probe = subscription_probe(engine)
-            evidence.update(
-                billing_route="subscription",
-                billing_status="UNPROBED",
-                billing_reason=probe.reason + " Native route runs. No API reservation is created.",
-                reservation_status="not_applicable",
-            )
-            return Admission(True, evidence, policy), command
+            if route == "api":
+                return blocked(
+                    f"{engine} has no API-key route. A CLI name is not subscription evidence. " + probe.reason,
+                    "permission",
+                )
+            return blocked(probe.reason, "permission")
         else:
             return blocked("billing auth evidence unavailable for this engine", "permission")
         if route == "api" and "run_api_cap_gbp" not in policy:

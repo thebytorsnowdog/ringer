@@ -298,10 +298,9 @@ class CapabilityMatrixTests(unittest.TestCase):
         loaded = assess_explicit_route(
             engine="grok", model="grok-4.7", billing_route="subscription", billing_policy_loaded=True,
         )
-        self.assertEqual("allowed", loaded.status)
-        self.assertEqual("subscription", loaded.billing_route)
+        self.assertEqual("blocked", loaded.status)
         self.assertIn("not subscription evidence", loaded.reason)
-        self.assertIn("No API reservation", loaded.reason)
+        self.assertIn("OpenRouter was not selected", loaded.reason)
         self.assertFalse(loaded.spends_openrouter)
 
 
@@ -377,13 +376,100 @@ class DispatchFailureTests(unittest.TestCase):
         with patch.dict(os.environ, {"XAI_API_KEY": secret}):
             runner = self._run(manifest, config)
         runtime = runner.runtimes[0]
+        self.assertEqual(0, runtime.attempts)
+        self.assertEqual("blocked", runtime.status)
         self.assertEqual("grok", runtime.task.engine)
-        self.assertGreaterEqual(runtime.attempts, 1)
-        self.assertEqual("UNPROBED", runtime.billing.get("billing_status"))
-        self.assertIn("No API reservation", runtime.billing.get("billing_reason") or "")
-        self.assertNotIn(secret, json.dumps(runtime.billing))
-        self.assertEqual("spawned\n", self.marker.read_text(encoding="utf-8"))
+        self.assertIn("not subscription evidence", runtime.setup_error or "")
+        self.assertIn("OpenRouter was not selected", runtime.setup_error or "")
+        self.assertNotIn(secret, runtime.setup_error or "")
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
+
+    def test_policy_loaded_unprobed_native_routes_do_not_run_or_fall_back(self) -> None:
+        secret = "native-test-secret-not-a-subscription"
+        cases = (
+            ("grok", "grok-4.7", "subscription", "not subscription evidence"),
+            ("grok", "grok-4.7", None, "not subscription evidence"),
+            ("grok", "grok-4.7", "api", "no API-key route"),
+            ("gemini", "gemini-4-argon-medium", "subscription", "keyring"),
+            ("gemini", "gemini-4-argon-medium", None, "keyring"),
+            ("gemini", "gemini-4-argon-medium", "api", "no API-key route"),
+            ("claude", "opus", "subscription", "not observed subscription evidence"),
+            ("claude", "opus", None, "not observed subscription evidence"),
+            ("claude", "opus", "api", "no API-key route"),
+        )
+        for engine, model, route, reason in cases:
+            with self.subTest(engine=engine, route=route):
+                self.marker.write_text("", encoding="utf-8")
+                self.marker.unlink()
+                native = self._stub(engine, f"#!/bin/sh\necho spawned >> {self.marker}\nprintf 'ok\\n' > out.txt\n")
+                paid = self._stub("paid-" + engine, f"#!/bin/sh\necho paid >> {self.marker}\nprintf 'ok\\n' > out.txt\n")
+                task = {
+                    "key": "one", "spec": "Write out.txt", "engine": engine, "model": model,
+                    "max_attempts": 1, "check": "grep -q ok out.txt", "expect_files": ["out.txt"],
+                }
+                if route is not None:
+                    task["billing_route"] = route
+                manifest = ringer.Manifest.from_obj({
+                    "run_name": f"unprobed-{engine}-{route or 'unset'}",
+                    "workdir": str(self.root / "work" / engine / (route or "unset")),
+                    "tasks": [task],
+                })
+                config = self._config({
+                    engine: ringer.EngineConfig(
+                        name=engine, bin=str(native), args_template=("-p", "{spec}"),
+                        full_access_args=(), sandbox_args=(), token_regex=None, model_default=model,
+                    ),
+                    "opencode": ringer.EngineConfig(
+                        name="opencode", bin=str(paid), args_template=("run", "{spec}"),
+                        full_access_args=(), sandbox_args=(), token_regex=None,
+                        model_default="openrouter/z-ai/glm-5.3-flash",
+                    ),
+                }, self._policy())
+                with patch.dict(os.environ, {
+                    "XAI_API_KEY": secret, "GEMINI_API_KEY": secret,
+                    "GOOGLE_API_KEY": secret, "ANTHROPIC_API_KEY": secret,
+                }):
+                    runner = self._run(manifest, config)
+                runtime = runner.runtimes[0]
+                self.assertEqual(0, runtime.attempts)
+                self.assertEqual("blocked", runtime.status)
+                self.assertEqual(engine, runtime.task.engine)
+                self.assertIn(reason, runtime.setup_error or "")
+                self.assertIn("OpenRouter was not selected", runtime.setup_error or "")
+                self.assertNotIn(secret, runtime.setup_error or "")
+                self.assertFalse(self.marker.exists())
+                self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
+
+    def test_without_a_billing_policy_grok_still_runs_and_does_not_reserve(self) -> None:
+        stub = self._stub("grok-open", "#!/bin/sh\nprintf 'ok\\n' > out.txt\n")
+        paid = self._stub("paid-open", "#!/bin/sh\necho paid > paid.txt\nprintf 'ok\\n' > out.txt\n")
+        manifest = ringer.Manifest.from_obj({
+            "run_name": "grok-no-policy",
+            "workdir": str(self.root / "work-open"),
+            "tasks": [{
+                "key": "one", "spec": "Write out.txt", "engine": "grok", "model": "grok-4.7",
+                "billing_route": "subscription", "max_attempts": 1,
+                "check": "grep -q ok out.txt", "expect_files": ["out.txt"],
+            }],
+        })
+        config = self._config({
+            "grok": ringer.EngineConfig(
+                name="grok", bin=str(stub), args_template=("-p", "{spec}"),
+                full_access_args=(), sandbox_args=(), token_regex=None, model_default="grok-4.7",
+            ),
+            "opencode": ringer.EngineConfig(
+                name="opencode", bin=str(paid), args_template=("run", "{spec}"),
+                full_access_args=(), sandbox_args=(), token_regex=None,
+            ),
+        })
+        runner = self._run(manifest, config)
+        runtime = runner.runtimes[0]
+        self.assertEqual("pass", runtime.status)
         self.assertEqual(1, runtime.attempts)
+        self.assertEqual("grok", runtime.task.engine)
+        self.assertEqual("DISABLED", runtime.billing.get("billing_status"))
+        self.assertFalse((self.root / "paid.txt").exists())
         self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
 
     def test_provider_error_does_not_switch_to_the_configured_openrouter_bin(self) -> None:

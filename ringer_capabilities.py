@@ -264,10 +264,9 @@ def assess_explicit_route(
     if billing_policy_loaded and billing_route in {None, "subscription"}:
         probe = subscription_probe(engine)
         if not probe.supported:
-            return _allowed(
-                engine, model, "subscription", provider,
-                probe.reason + " Native route runs. No API reservation is created. "
-                + OPENROUTER_NOT_SELECTED,
+            return _blocked(
+                engine, model, billing_route, provider,
+                probe.reason + " " + OPENROUTER_NOT_SELECTED,
             )
     route = "subscription" if billing_route in {None, "subscription"} else billing_route
     if route != "subscription":

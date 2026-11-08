@@ -81,8 +81,8 @@ subscription harness that supports the provider (`billing_route: "subscription"`
 `service_tier: "standard"`):
 
 - **Codex host, OpenAI models:** `engine: "codex"`. Subscription auth is ChatGPT login, not an OpenAI API key and not OpenAI API credit balance. API use is a separate `billing_route: "api"` with observed `api_key` auth. Codex does not require OpenCode.
-- **Grok host, xAI models:** `engine: "grok"` via `grok login` OAuth. That session does not authenticate OpenAI, Gemini, or OpenRouter. A billing policy does not stop this route and does not prove the login.
-- **Gemini / Antigravity host, Google models:** `engine: "gemini"` (`engines/gemini_worker.py` execs `agy` and strips Gemini API keys). The `gemini` CLI is not this harness. A billing policy does not stop this route and does not read the keyring.
+- **Grok host, xAI models:** `engine: "grok"` via `grok login` OAuth. That session does not authenticate OpenAI, Gemini, or OpenRouter. A loaded billing policy stops this route until a supported subscription probe exists.
+- **Gemini / Antigravity host, Google models:** `engine: "gemini"` (`engines/gemini_worker.py` execs `agy` and strips Gemini API keys). The `gemini` CLI is not this harness. A loaded billing policy stops this route until a supported subscription probe exists. The keyring is not read.
 - **Claude Code host, Anthropic models:** `engine: "claude"` (`opus`, `sonnet`, `haiku`).
 - **Hermes host:** use the subscription engine for the provider in play.
 

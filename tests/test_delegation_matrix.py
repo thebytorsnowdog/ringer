@@ -12,9 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import json
+from ringer_billing import enforce_opencode_command
 from ringer_costs import billing_preflight
 from ringer_delegation import (
     canonical_shortlist_model,
+    fx_from_ecb_csv,
     load_catalogue,
     load_matrix,
     prepare_openrouter_dispatch,
@@ -36,7 +38,44 @@ def policy(**extra):
     return base
 
 
+ECB_FIXTURE = """KEY,FREQ,CURRENCY,CURRENCY_DENOM,EXR_TYPE,EXR_SUFFIX,TIME_PERIOD,OBS_VALUE
+EXR.D.GBP.EUR.SP00.A,D,GBP,EUR,SP00,A,2026-11-06,0.83415
+EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,2026-11-06,1.1165
+"""
+
+
 class DelegationMatrixTests(unittest.TestCase):
+    def test_ecb_cross_records_the_observation_date_and_the_rounded_ratio(self) -> None:
+        record = fx_from_ecb_csv(ECB_FIXTURE, fetched_on="2026-11-08")
+        self.assertEqual("0.74711", record["usd_to_gbp"])
+        self.assertEqual("2026-11-06", record["dated"])
+        self.assertIn("0.83415", record["source"])
+        self.assertIn("1.1165", record["source"])
+
+    def test_opencode_22_command_rejects_removed_flags_and_an_unconfirmed_variant(self) -> None:
+        model = "openrouter/z-ai/glm-5.3-flash"
+        spec = "do the work"
+        accepted = enforce_opencode_command(
+            ["wrapper", "run", "--standalone", "--auto", "--format", "json", "-m", model, spec],
+            model,
+            spec,
+        )
+        self.assertIn("--standalone", accepted)
+        with self.assertRaisesRegex(ValueError, "--variant"):
+            enforce_opencode_command(
+                ["wrapper", "run", "--standalone", "-m", model, "--variant", "medium", spec], model, spec,
+            )
+        with self.assertRaisesRegex(ValueError, "--dir"):
+            enforce_opencode_command(
+                ["wrapper", "run", "--standalone", "-m", model, "--dir", "/tmp/task", spec], model, spec,
+            )
+        with self.assertRaisesRegex(ValueError, "--standalone"):
+            enforce_opencode_command(["wrapper", "run", "-m", model, spec], model, spec)
+        with self.assertRaisesRegex(ValueError, "variant"):
+            enforce_opencode_command(
+                ["wrapper", "run", "--standalone", "-m", model + "#medium", spec], model + "#medium", spec,
+            )
+
     def test_approval_is_the_chat_record_and_not_a_quality_rank(self) -> None:
         matrix = load_matrix()
         self.assertEqual("user-chat-2026-11-08T21:11:00Z", matrix["approval"]["id"])
@@ -98,7 +137,9 @@ class DelegationMatrixTests(unittest.TestCase):
 
     def test_selector_picks_the_cheaper_suitable_shortlist_model_without_a_rank(self) -> None:
         decision = select_bounded_worker(policy=policy(), now=NOW)
-        self.assertTrue(decision.allowed, decision.reason)
+        self.assertFalse(decision.allowed)
+        self.assertIn("not a provider hard cap", decision.reason)
+        self.assertIsNone(decision.reserve_gbp)
         self.assertEqual("openrouter/z-ai/glm-5.3-flash", decision.model)
         self.assertEqual("api", decision.auth_route)
         self.assertEqual("bounded", decision.complexity)
@@ -153,7 +194,9 @@ class DelegationMatrixTests(unittest.TestCase):
             model="openrouter/z-ai/glm-5.3-flash", allowance="0.25", attempt=1,
             policy=policy(monthly_api_cap_gbp="100", run_api_cap_gbp="50"), now=NOW,
         )
-        self.assertTrue(decision.allowed, decision.reason)
+        self.assertFalse(decision.allowed)
+        self.assertIsNone(decision.reserve_gbp)
+        self.assertIn("not a provider hard cap", decision.reason)
         assert decision.policy is not None
         self.assertEqual("10", decision.policy["monthly_api_cap_gbp"])
         self.assertEqual("1", decision.policy["run_api_cap_gbp"])

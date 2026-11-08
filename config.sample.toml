@@ -188,7 +188,11 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # OpenRouter key where your OpenCode version expects it — commonly
 # ~/.local/share/opencode/auth.json ({"openrouter": {"type": "api", "key": "..."}});
 # confirm the path with your installed CLI.
-# Per-task engine_args can set reasoning effort ("--variant", "low|high|max").
+# OpenCode 2.2.6 `run --help` accepts -m provider/model#variant, --format
+# default|json, --auto, and --standalone. It does not accept --variant or --dir.
+# No variant token is confirmed, so {model} is passed without #variant.
+# --standalone keeps the server in this process so the seatbelt profile still
+# wraps it. Ringer's process cwd is the task directory.
 # Uncomment and set an absolute path for `bin` to enable.
 # [engines.opencode]
 # bin = "/absolute/path/to/ringer/engines/opencode-sandboxed.sh"
@@ -197,14 +201,13 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 #   "{taskdir}",
 #   "{access_args}",
 #   "run",
+#   "--standalone",
 #   "-m",
 #   "{model}",
-#   "--dangerously-skip-permissions",
+#   "--auto",
 #   "--format",
 #   "json",
 #   "{engine_args}",
-#   "--dir",
-#   "{taskdir}",
 #   "{spec}",
 # ]
 # sandbox_args = []

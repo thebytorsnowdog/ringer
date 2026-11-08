@@ -1,11 +1,14 @@
 #!/bin/bash
 # Ringer engine wrapper: run OpenCode under a macOS Seatbelt sandbox.
 #
-# OpenCode has no OS-level sandbox of its own — its --dangerously-skip-permissions
-# flag (required for headless runs) disables ALL of its interactive approval
-# prompts. This wrapper supplies the real containment: full network and reads,
-# writes confined to the task dir, a per-run scratch/cache dir, and OpenCode's
-# own state dirs.
+# OpenCode has no OS-level sandbox of its own. OpenCode 2.2.6 run starts a
+# background server unless the forwarded argv includes --standalone. That
+# server would sit outside this Seatbelt profile and could write beyond the
+# task directory. The engine template must pass --standalone, --auto, and
+# --format json. 2.2.6 does not accept --variant or --dir; Ringer's cwd is
+# the task directory. This wrapper supplies the real containment: full
+# network and reads, writes confined to the task dir, a per-run scratch/cache
+# dir, and OpenCode's own state dirs.
 #
 # Usage (as a ringer engine bin):
 #   opencode-sandboxed.sh <taskdir> [--no-sandbox] [--writable-root PATH]... <opencode args...>

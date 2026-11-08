@@ -647,7 +647,7 @@ class AskBillingTests(unittest.TestCase):
 
     def add_opencode(self):
         self.config.engines['opencode'] = ringer.EngineConfig(name='opencode', bin=str(self.binary),
-            args_template=('run', '--model', '{model}', '{engine_args}', '{spec}'),
+            args_template=('run', '--standalone', '--auto', '--format', 'json', '--model', '{model}', '{engine_args}', '{spec}'),
             full_access_args=(), sandbox_args=(), token_regex=None,
             model_default='openrouter/z-ai/glm-5.2')
 

@@ -149,7 +149,6 @@ class ModelAssessmentBoundaryTests(unittest.TestCase):
             self.task(
                 "terra", engine="opencode", model="openrouter/example/terra",
                 billing_route="api", task_spend_allowance_gbp=1,
-                engine_args=["--variant", "medium"],
             ),
         ]
         config = self.config({"codex": self.engine(), "opencode": self.engine("opencode")})
@@ -161,7 +160,8 @@ class ModelAssessmentBoundaryTests(unittest.TestCase):
         runner = ringer.RingerRunner(manifest, config, "test", dashboard_enabled=False)
         self.assertEqual(0, asyncio.run(runner.run()))
         self.assertIn("model_reasoning_effort=high", runner.runtimes[0].last_worker_command)
-        self.assertIn("--variant", runner.runtimes[1].last_worker_command)
+        self.assertNotIn("--variant", runner.runtimes[1].last_worker_command or "")
+        self.assertNotIn("--dir", runner.runtimes[1].last_worker_command or "")
 
     def test_spec_or_checker_change_invalidates_old_binding(self):
         config = self.config()
@@ -409,16 +409,27 @@ class ModelAssessmentBoundaryTests(unittest.TestCase):
             asyncio.run(ringer.RingerRunner(wrong, config, "test", dashboard_enabled=False).run())
         self.assertFalse(self.marker.exists())
 
-        policy = {"monthly_api_cap_gbp": 0, "run_api_cap_gbp": 0, "automatic_paid_fallback": False}
-        api_config = self.config({"opencode": self.engine("opencode")}, policy=policy)
+        policy = {
+            "monthly_api_cap_gbp": 0, "run_api_cap_gbp": 0, "automatic_paid_fallback": False,
+            "fx": {"usd_to_gbp": "0.74711", "dated": "2026-11-06"},
+        }
+        paid_engine = dataclasses.replace(
+            self.engine("opencode"),
+            args_template=(
+                str(self.worker), str(self.marker), "run", "--standalone", "--auto",
+                "--format", "json", "-m", "{model}", "{engine_args}", "{spec}",
+            ),
+        )
+        api_config = self.config({"opencode": paid_engine}, policy=policy)
         api_raw = self.raw_manifest([
-            self.task(engine="opencode", model="openrouter/example/model", billing_route="api",
-                      task_spend_allowance_gbp=1, engine_args=["--variant", "medium"])
+            self.task(engine="opencode", model="openrouter/z-ai/glm-5.3-flash", billing_route="api",
+                      task_spend_allowance_gbp=0.25)
         ])
         api_manifest = self.assessed(api_raw, api_config, effort="medium")
         api_runner = ringer.RingerRunner(api_manifest, api_config, "test", dashboard_enabled=False)
         self.assertEqual(1, asyncio.run(api_runner.run()))
         self.assertEqual(0, api_runner.runtimes[0].attempts)
+        self.assertIn("allowance unavailable", api_runner.runtimes[0].setup_error or "")
         self.assertFalse(self.marker.exists())
         ledger = self.root / "state/cost-reservations.json"
         if ledger.exists():

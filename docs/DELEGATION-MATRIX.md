@@ -33,9 +33,15 @@ The machine-readable copies are `registry/openrouter-catalogue-2026-11-08.json` 
 
 Aliases `z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash` map to the `openrouter/` canonical ids. Anything else is refused.
 
-A reservation is the conservative estimate, rounded up to 0.0001 GBP: input tokens times the input price, plus output tokens times the output price, times a USD-to-GBP rate. The default hold is 200,000 input tokens and 64,000 output tokens when the task does not name a smaller budget. That hold is a policy choice, not a measured bill.
+The conservative figure is rounded up to 0.0001 GBP: input tokens times the input price, plus output tokens times the output price, times a USD-to-GBP rate. The default inputs are 200,000 input tokens and 64,000 output tokens when the task does not name a smaller budget. That figure is a policy estimate, not a measured bill and not a provider hard cap.
 
-The rate must be dated and no older than 14 days. A rate dated 2026-09-02 is stale on 2026-11-08, so paid admission refuses until a current rate is recorded. The existing pricing table in the cost policy is not changed by this matrix.
+OpenCode 2.2.6 `run --help` lists `-m provider/model#variant`, `--format default|json`, `--auto`, and `--standalone`. It does not list `--variant`, `--dir`, or a token, output, or tool-call ceiling. No variant name is confirmed, so Ringer does not append `#medium`. Because the CLI can tool-loop past the estimate, paid dispatch is refused before a reservation and before a worker starts. The £0.25, £1, and £10 ceilings remain the approval bounds for any later bounded call.
+
+The rate must be dated and no older than 14 days. A rate dated 2026-09-02 is stale on 2026-11-08. The authorised refresh is the ECB daily euro foreign-exchange feed, no API key:
+
+`https://data-api.ecb.europa.eu/service/data/EXR/D.GBP+USD.EUR.SP00.A?lastNObservations=1&format=csvdata`
+
+Fetched 2026-11-08, latest observation 2026-11-06: EURGBP `0.83415`, EURUSD `1.1165`. USD to GBP is that ratio, `0.83415 / 1.1165`, half-up to five decimal places: `0.74711`. Record `fx.dated` as the observation date `2026-11-06`, `fx.usd_to_gbp` as `0.74711`, and `fx.source` as the URL plus both observations. Do not use the September rate. Do not change the pricing table in the same edit.
 
 The approved ceilings bind even if a policy file names a higher cap: £10 in a month, £1 for every paid attempt in one swarm run, and £0.25 for one worker task. A lower cap in the policy file still binds. There is no automatic paid retry.
 

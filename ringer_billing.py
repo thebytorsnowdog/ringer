@@ -249,11 +249,24 @@ def enforce_opencode_command(command: list[str], model: str, spec: str) -> list[
             models.append(arg.partition("=")[2])
         elif arg.startswith("-m") and arg != "-m":
             models.append(arg[2:])
+        if arg in {"--variant", "--dir"} or arg.startswith(("--variant=", "--dir=")):
+            raise ValueError(
+                "OpenCode 2.2.6 run does not accept --variant or --dir; "
+                "use --standalone and the process cwd as the task directory"
+            )
         if arg in {"-c", "--config", "-p", "--provider", "--base-url", "--api-key", "--auth"} or arg.startswith(
             ("--config=", "--provider=", "--model-provider=", "--base-url=", "--api-key=", "--auth=")):
             raise ValueError("billing rejects ambiguous OpenCode custom routing arguments")
+    if any("#" in item for item in models):
+        raise ValueError(
+            "OpenCode 2.2.6 documents -m provider/model#variant, and no variant name is confirmed"
+        )
     if models != [model]:
         raise ValueError("billing requires exactly one forwarded OpenRouter model matching the task model")
+    if "--standalone" not in args:
+        raise ValueError(
+            "OpenCode 2.2.6 must include --standalone so its server stays inside the sandbox process"
+        )
     return command
 
 

@@ -8,12 +8,59 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_UP
+from decimal import Decimal, ROUND_HALF_UP, ROUND_UP
 from pathlib import Path
 from typing import Any
 
 MATRIX_PATH = Path(__file__).resolve().parent / "registry" / "delegation-matrix.json"
 CATALOGUE_PATH = Path(__file__).resolve().parent / "registry" / "openrouter-catalogue-2026-11-08.json"
+ECB_EXR_URL = (
+    "https://data-api.ecb.europa.eu/service/data/EXR/D.GBP+USD.EUR.SP00.A"
+    "?lastNObservations=1&format=csvdata"
+)
+
+
+def usd_gbp_from_eur_cross(eur_gbp: str, eur_usd: str) -> str:
+    """GBP per 1 USD from the two euro crosses, half-up to five decimal places."""
+    rate = (Decimal(eur_gbp) / Decimal(eur_usd)).quantize(Decimal("0.00001"), rounding=ROUND_HALF_UP)
+    if rate <= 0:
+        raise ValueError("fx rate must be positive")
+    return format(rate, "f")
+
+
+def fx_from_ecb_csv(text: str, *, fetched_on: str) -> dict[str, str]:
+    """Read one ECB EXR csvdata table. Observation date is fx.dated, not the fetch date."""
+    import csv
+
+    rows = list(csv.reader(text.splitlines()))
+    header = next((row for row in rows if "OBS_VALUE" in row and "TIME_PERIOD" in row), None)
+    if header is None:
+        raise ValueError("ECB CSV has no TIME_PERIOD and OBS_VALUE columns")
+    key_at = header.index("KEY") if "KEY" in header else 0
+    period_at = header.index("TIME_PERIOD")
+    value_at = header.index("OBS_VALUE")
+    found: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        if len(row) <= max(key_at, period_at, value_at) or row == header:
+            continue
+        key = row[key_at]
+        series = "GBP" if ".GBP." in key else "USD" if ".USD." in key else ""
+        if series:
+            found[series] = (row[period_at], row[value_at])
+    if set(found) != {"GBP", "USD"}:
+        raise ValueError("ECB CSV must contain the GBP and USD euro crosses")
+    if found["GBP"][0] != found["USD"][0]:
+        raise ValueError("ECB GBP and USD observations are not the same date")
+    observation = found["GBP"][0]
+    rate = usd_gbp_from_eur_cross(found["GBP"][1], found["USD"][1])
+    return {
+        "usd_to_gbp": rate,
+        "dated": observation,
+        "source": (
+            f"{ECB_EXR_URL} observations {observation} fetched {fetched_on}; "
+            f"EURGBP {found['GBP'][1]} / EURUSD {found['USD'][1]} rounded half-up to 5 d.p."
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -226,12 +273,27 @@ def prepare_openrouter_dispatch(
     monthly_cap = min(_decimal(policy["monthly_api_cap_gbp"]), _decimal(approval["monthly_gbp"]))
     run_value = policy.get("run_api_cap_gbp")
     run_cap = _decimal(approval["run_gbp"]) if run_value is None else min(_decimal(run_value), _decimal(approval["run_gbp"]))
+    if estimate > monthly_cap or estimate > run_cap:
+        return DelegationDecision(
+            False,
+            "allowance unavailable, terminal reservation or recorded overspend",
+            "quota",
+            complexity,
+            task_class,
+            canonical,
+            "opencode",
+            "api",
+            str(estimate),
+            approval_id,
+        )
     narrowed = dict(policy)
     narrowed["monthly_api_cap_gbp"] = str(monthly_cap)
     narrowed["run_api_cap_gbp"] = str(run_cap)
     return DelegationDecision(
-        True,
-        "planned GLM/DeepSeek delegation within the 2026-11-08 approval",
+        False,
+        "OpenCode 2.2.6 run help lists -m provider/model#variant, --format, --auto, and --standalone. "
+        "It does not list a token, output, or tool-call ceiling. "
+        f"£{estimate} is an estimate, not a provider hard cap, so this attempt is not dispatched.",
         "permission",
         complexity,
         task_class,
@@ -240,7 +302,7 @@ def prepare_openrouter_dispatch(
         "api",
         str(estimate),
         approval_id,
-        reserve_gbp=str(estimate),
+        reserve_gbp=None,
         policy=narrowed,
     )
 

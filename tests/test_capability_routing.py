@@ -460,7 +460,7 @@ class DispatchFailureTests(unittest.TestCase):
         engines = {
             "opencode": ringer.EngineConfig(
                 name="opencode", bin=str(binary),
-                args_template=("run", "-m", "{model}", "{spec}"),
+                args_template=("run", "--standalone", "--auto", "--format", "json", "-m", "{model}", "{spec}"),
                 full_access_args=(), sandbox_args=(), token_regex=None,
             ),
         }
@@ -492,10 +492,11 @@ class DispatchFailureTests(unittest.TestCase):
             }],
         })
         runner = self._run(allowed, self._config(engines, self._policy()))
-        self.assertEqual("pass", runner.runtimes[0].status)
-        self.assertEqual("ADMITTED", runner.runtimes[0].billing.get("billing_status"))
-        ledger = json.loads((self.root / "state" / "cost-reservations.json").read_text(encoding="utf-8"))
-        self.assertTrue(ledger["reservations"])
+        self.assertEqual("blocked", runner.runtimes[0].status)
+        self.assertEqual(0, runner.runtimes[0].attempts)
+        self.assertIn("not a provider hard cap", runner.runtimes[0].setup_error or "")
+        self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
+        self.assertFalse((self.root / "work-allowed" / "one" / "out.txt").exists())
 
 
 class WrapperPreflightTests(unittest.TestCase):

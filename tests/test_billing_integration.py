@@ -120,7 +120,7 @@ class BillingIntegrationTests(unittest.TestCase):
         task.update(fields)
         manifest = ringer.Manifest.from_obj(dict(run_name='opencode-billing-test', workdir=str(self.root/'work'), tasks=[task]))
         engine = ringer.EngineConfig(name='opencode', bin=str(self.binary),
-            args_template=('run', '--model', '{model}', '{engine_args}', '{spec}'),
+            args_template=('run', '--standalone', '--auto', '--format', 'json', '--model', '{model}', '{engine_args}', '{spec}'),
             full_access_args=(), sandbox_args=(), token_regex=None)
         config = ringer.AppConfig(path=None, identity_default=None, state_dir=self.root/'state',
             dashboard_port_base=18787, hud_port=18788, hud_app_path=None, allow_full_access=False,
@@ -240,14 +240,12 @@ class BillingIntegrationTests(unittest.TestCase):
         self.policy.write_text(json.dumps(dict(monthly_api_cap_gbp=10, run_api_cap_gbp=5,
             fx=dict(usd_to_gbp='0.8', dated='2026-11-08'))))
         runner = self.opencode_runner()
-        self.assertEqual(0, asyncio.run(runner.run()))
-        argv = json.loads((self.root/'worker-argv.json').read_text())
-        self.assertEqual(['run', '--model', 'openrouter/z-ai/glm-5.3-flash'], argv[:3])
+        self.assertEqual(1, asyncio.run(runner.run()))
+        self.assertEqual(0, runner.runtimes[0].attempts)
+        self.assertIn('not a provider hard cap', runner.runtimes[0].billing['billing_reason'])
+        self.assertFalse((self.root/'worker-argv.json').exists())
         self.assertFalse((self.root/'admissions').exists())
-        row = self.rows()[0]
-        self.assertEqual(('api', None, 'unresolved'),
-                         (row['billing_route'], row['observed_auth_mode'], row['reservation_status']))
-        self.assertEqual([f'{runner.run_id}/one/1'], list(self.ledger()))
+        self.assertFalse((self.root/'state'/'cost-reservations.json').exists())
 
     def test_opencode_requires_explicit_api_route_and_unambiguous_model_arguments(self):
         for fields in (dict(billing_route='subscription'), dict(engine_args=['--model', 'openrouter/other/model']),

@@ -10447,9 +10447,28 @@ def validate_manifest_model_assessment(
         model = _single_route_value(
             _model_values_from_command(inspected), task.key, "model"
         )
-        resolved_effort = _single_route_value(
-            _effort_values_from_command(inspected), task.key, "effort"
-        )
+        if engine.name in {"opencode", "openrouter"}:
+            # 2.2.6 documents provider/model#variant and does not accept --variant.
+            # No variant token is confirmed, so the assessment effort stays on the
+            # record and is not copied onto the command.
+            if _effort_values_from_command(inspected) or any(
+                arg in {"--variant", "--dir"} or arg.startswith(("--variant=", "--dir="))
+                for arg in inspected
+            ):
+                raise ModelAssessmentError(
+                    f"task {task.key}: OpenCode 2.2.6 run does not accept --variant or --dir; "
+                    "no variant token is confirmed, so effort is not placed on the command"
+                )
+            if not effort:
+                raise ModelAssessmentError(
+                    f"task {task.key}: assessment effort is required; OpenCode 2.2.6 "
+                    "does not forward it as a command flag"
+                )
+            resolved_effort = effort
+        else:
+            resolved_effort = _single_route_value(
+                _effort_values_from_command(inspected), task.key, "effort"
+            )
         service_values = _service_values_from_command(inspected)
         if engine.name == DEFAULT_ENGINE_NAME:
             resolved_service = _single_route_value(
@@ -10534,6 +10553,10 @@ def build_worker_command(
     if reasoning_effort and not has_effort_override:
         if engine.name == DEFAULT_ENGINE_NAME:
             assessed_args += ("-c", f"model_reasoning_effort={reasoning_effort}")
+        elif engine.name in {"opencode", "openrouter"}:
+            # OpenCode 2.2.6 run has no --variant flag. provider/model#variant is
+            # documented, and no variant token is confirmed, so none is injected.
+            pass
         elif effort_flag:
             assessed_args += (effort_flag, reasoning_effort)
         else:

@@ -305,7 +305,6 @@ source = "fixture"
                             "engine": "opencode",
                             "model": "openrouter/x-ai/grok-4.5",
                             "billing_route": "api",
-                            "engine_args": ["--variant", "medium"],
                             "spec": "Create the requested output with enough detail to satisfy the route fixture contract.",
                             "check": "test -s output.txt || { echo missing; exit 1; }",
                             "expect_files": ["output.txt"],
@@ -329,6 +328,7 @@ source = "fixture"
         assessment["strategy"] = "Exercise the deliberate noncanonical-route escape only."
         for row in assessment["tasks"].values():
             row.update(
+                effort="medium",
                 rationale="The test deliberately compares a noncanonical route.",
                 alternative_considered="The canonical Grok harness is the normal route.",
                 context_plan="Use only the bounded fixture task.",

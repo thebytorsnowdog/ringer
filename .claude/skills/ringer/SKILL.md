@@ -88,7 +88,7 @@ subscription harness that supports the provider (`billing_route: "subscription"`
 
 **No automatic OpenRouter fallback.** A usage cap, missing binary, auth failure, or provider error stops the route. Do not rewrite the task to `engine: "openrouter"` or `engine: "opencode"`. A cost-policy cap and `automatic_paid_fallback` are not approval to spend.
 
-**Planned GLM/DeepSeek delegation** is a separate choice, recorded in `docs/DELEGATION-MATRIX.md`. Ian approved it at `2026-11-08T21:11:00Z` for the two flash shortlist models only, within £10 in a month, £1 for a swarm run, and £0.25 for one worker task, with no automatic paid retry. Coordinator review stays on the native subscription route. A stale USD-to-GBP rate or a missing `opencode` binary still refuses dispatch. Do not install the CLI.
+**Planned GLM/DeepSeek delegation** is a separate choice, recorded in `docs/DELEGATION-MATRIX.md`. Ian approved it at `2026-11-08T21:11:00Z` for the two flash shortlist models only, within £10 in a month, £1 for a swarm run, and £0.25 for one worker task, with no automatic paid retry. Coordinator review stays on the native subscription route. A stale USD-to-GBP rate, a missing `opencode` binary, or the absence of a documented token or tool-call ceiling still refuses dispatch. OpenCode 2.2.6 `run` has no such ceiling, so the £0.25 figure is an estimate and the paid attempt is not started. Do not install the CLI. Do not pass `--variant` or `--dir`; that release does not accept them.
 
 Choices within existing authority are coordinator decisions. Ask only for
 genuinely missing authority. Preserve executable checks, sandbox confinement,

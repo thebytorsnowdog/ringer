@@ -390,7 +390,8 @@ class BenchmarkContractTests(unittest.TestCase):
         }))
         admission, _ = asyncio.run(ringer_billing.admit(policy_path=policy, engine=task.engine,
             binary='unused-local-fixture', model=task.model, route=task.billing_route,
-            allowance=task.task_spend_allowance_gbp, command=['unused-local-fixture', 'run', '--model', task.model, task.spec],
+            allowance=task.task_spend_allowance_gbp,
+            command=['unused-local-fixture', 'run', '--standalone', '--auto', '--format', 'json', '--model', task.model, task.spec],
             spec=task.spec, taskdir=out, state_dir=out/'state', run_id='fixture', task_key=task.key, attempt=1))
         self.assertFalse(admission.allowed)
         self.assertEqual('BLOCKED', admission.evidence['billing_status'])

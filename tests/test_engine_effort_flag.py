@@ -71,9 +71,14 @@ class EngineEffortFlagTests(unittest.TestCase):
         self.assertNotIn("--variant", command)
 
     def test_build_worker_command_defaults_to_variant(self) -> None:
-        command = command_for(engine("opencode"), reasoning_effort="low")
+        command = command_for(engine("other"), reasoning_effort="low")
         variant_at = command.index("--variant")
         self.assertEqual(["--variant", "low"], command[variant_at:variant_at + 2])
+
+    def test_opencode_22_does_not_receive_an_unconfirmed_variant_flag(self) -> None:
+        command = command_for(engine("opencode"), reasoning_effort="medium")
+        self.assertNotIn("--variant", command)
+        self.assertNotIn("#medium", " ".join(command))
 
     def test_existing_effort_flag_in_engine_args_is_not_repeated(self) -> None:
         separate = command_for(

@@ -13,37 +13,23 @@ Unnamed, custom or apparently non-model wrappers must be assessed, or the job
 stops. Historical manifests remain readable, but they need a fresh assessment
 before a new execution; historical data reads are unaffected.
 
-## Automatic use, originating-harness subscription routing, and OpenRouter usage-cap fallback
+## Automatic use and capability-aware subscription routing
 
 Use Ringer whenever the workflow benefits from it, without asking permission
 or requiring model-selection confirmation. The model/harness starting the
-request coordinates specs, checks, routing and review, and **must route Ringer
-worker tasks through its own native subscription engine first**
+request coordinates specs, checks, routing and review, and routes a new task
+through the native subscription harness that actually supports the provider
 (`billing_route: "subscription"`, `service_tier: "standard"`):
 
-- **Gemini / Antigravity host:** `engine: "gemini"` (uses `engines/gemini_worker.py` -> `agy` with Google AI Ultra subscription OAuth; models `gemini-4-argon-low`, `gemini-4-argon-medium`, `gemini-4-argon-high`, `gemini-3.8-flash-low`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-high`).
-- **Claude Code host:** `engine: "claude"` (`opus`, `sonnet`, `haiku`).
-- **Codex host:** `engine: "codex"` (`gpt-5.4` / configured Codex subscription slugs).
-- **Grok host:** `engine: "grok"` (`grok-4.7`).
-- **Hermes host:** use the active subscription engine for the session (`gemini`, `claude`, `codex`, or `grok`).
+- **Codex host, OpenAI models:** `engine: "codex"`. Subscription auth is ChatGPT login (`forced_login_method="chatgpt"`, account type `chatgpt`). That is separate from an OpenAI API key and from OpenAI API credit balance. An API task sets `billing_route: "api"` and needs observed `api_key` auth.
+- **Grok host, xAI models:** `engine: "grok"` after `grok login` on a SuperGrok or X Premium Plus plan. This OAuth session does not authenticate OpenAI, Gemini, or OpenRouter. Ringer's billing probe does not observe it; with a billing policy loaded the task stops instead of moving to another harness.
+- **Gemini / Antigravity host, Google models:** `engine: "gemini"` via `engines/gemini_worker.py`, which execs the Antigravity CLI `agy` and removes `GEMINI_API_KEY` and `GOOGLE_API_KEY`. The `gemini` binary is not this harness. Grok and Codex logins do not authenticate it.
+- **Claude Code host, Anthropic models:** `engine: "claude"`.
+- **Hermes host:** use the subscription engine for the provider in play (`codex`, `grok`, `gemini`, or `claude`).
 
-**Automatic OpenRouter fallback on usage cap:**
-If a subscription task hits a usage cap—either **pre-dispatch** (when
-`~/.local/state/omarchy/agents/usage/<agent>.json` reports `percent >= 1.0`
-with a non-expired `resetsAt`, or billing admission reports `quota`) or
-**mid-run** (when a worker attempt fails with `failure_class == "quota"` /
-`ResourceExhausted` / rate-limit exhaustion)—Ringer automatically reverts the
-task to `engine: "openrouter"` (`billing_route: "api"`, backed by
-`engines/openrouter_worker.py` and `~/.config/ringer/openrouter.key`)
-so the workflow continues without failing the job.
+OpenCode is not required for those routes. A Codex run does not look for `opencode`.
 
-**Mandatory user notification on fallback:**
-When fallback triggers, Ringer records `quota_fallback` in the run state JSON
-and `lifecycle.jsonl`, prints a `[ringer.py] USAGE CAP FALLBACK` banner and
-summary section, and sends a desktop notification (`notify-send`). The
-coordinating agent **must also explicitly tell the user in its response**
-which task(s) hit the subscription usage cap and which OpenRouter model was
-used to complete the work.
+**No automatic OpenRouter fallback.** A usage cap, missing CLI, auth failure, or provider error stops that route. Ringer does not rewrite the task onto `openrouter` or `opencode`, does not reserve OpenRouter spend, and does not treat `automatic_paid_fallback` or a budget cap as approval. OpenRouter runs only when the task names `engine: "opencode"` or `engine: "openrouter"`, a model starting with `openrouter/`, `billing_route: "api"`, and a spend allowance. `engines/opencode-sandboxed.sh` is a wrapper: preflight fails before spend when `opencode` itself is absent, even if the wrapper is executable. Tell the user the route stopped. Do not install a CLI for them.
 
 Choices within existing authority are coordinator decisions. Ask only for
 genuinely missing authority. Preserve executable checks, sandbox confinement,

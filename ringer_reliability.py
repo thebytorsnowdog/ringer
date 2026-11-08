@@ -216,7 +216,12 @@ def select_openrouter_fallback_model(
     state_dir: Path | None = None,
     default_model: str = "openrouter/z-ai/glm-5.3-flash",
 ) -> str:
-    """Choose the OpenRouter fallback model for a capped subscription task."""
+    """Read a catalogue preference. The runner does not call this to spend.
+
+    A null role_candidates object used to raise AttributeError on .get. That
+    crash is not a route change, and this function still does not authorise
+    OpenRouter.
+    """
     override = (os.environ.get("RINGER_OPENROUTER_FALLBACK_MODEL") or "").strip()
     if override:
         return override if override.startswith("openrouter/") else f"openrouter/{override}"
@@ -239,7 +244,10 @@ def select_openrouter_fallback_model(
         if assessment_path.is_file():
             try:
                 report = json.loads(assessment_path.read_text(encoding="utf-8"))
-                candidates = report.get("role_candidates", {}).get("agentic_coding", [])
+                role_candidates = report.get("role_candidates") if isinstance(report, dict) else None
+                if not isinstance(role_candidates, dict):
+                    role_candidates = {}
+                candidates = role_candidates.get("agentic_coding", [])
                 if isinstance(candidates, list) and candidates:
                     eligible_ids = {
                         str(entry.get("id")).strip()

@@ -175,9 +175,10 @@ model_report_regex = "(?m)^model:[ \\t]*([^ \\t\\r\\n]+)[ \\t]*\\r?$"
 # sandbox_args = []
 # full_access_args = []
 
-# OpenCode + OpenRouter — the universal model harness. One engine block runs
-# ANY OpenRouter-served model: the {model} placeholder is filled per task from
-# the manifest's explicit "model" field; keep model_default empty.
+# OpenCode + OpenRouter — an explicit API harness, not a subscription route and
+# not a stand-in for Codex, Grok, or Gemini. One engine block runs an
+# OpenRouter model named by the task's "model" field; keep model_default empty.
+# The bin is a wrapper. Preflight also requires the `opencode` CLI on PATH.
 # OpenRouter routes must be explicit per task under the probation policy in
 # docs/MODEL-ROUTING.md. Historical GLM-5.2 price reference: z-ai/glm-5.2,
 # roughly $0.74/M input, $2.33/M output as of 2026-07.

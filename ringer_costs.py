@@ -675,8 +675,25 @@ def billing_preflight(*, engine: str, model: str | None, policy: Any,
         route = billing_route or ("subscription" if engine in {"codex", "chatgpt"} else "api")
         if type(auto_fallback_requested) is not bool:
             raise ValueError("auto_fallback_requested must be boolean")
-        # An explicit provider route is API even if the caller labels it included.
-        if engine in {"opencode", "openrouter"} or (isinstance(model, str) and model.startswith("openrouter/")):
+        if auto_fallback_requested:
+            return BillingDecision(
+                False,
+                "automatic OpenRouter fallback is not authorised; name an explicit OpenRouter task",
+                route,
+            )
+        openrouter_task = engine in {"opencode", "openrouter"} or (
+            isinstance(model, str) and model.startswith("openrouter/")
+        )
+        if openrouter_task and route == "subscription":
+            return BillingDecision(
+                False,
+                "OpenRouter cannot use a native subscription; an explicit api billing_route is required",
+                "api",
+            )
+        if openrouter_task and engine not in {"opencode", "openrouter"}:
+            return BillingDecision(False, "an openrouter model is not admitted on this harness", route)
+        # An explicit OpenRouter task is API spend. A subscription label was refused above.
+        if openrouter_task:
             route = "api"
         if route == "subscription":
             if engine not in {"codex", "chatgpt"} or observed_auth_mode != "chatgpt" or "chatgpt" not in p["subscription_auth_modes"]:
@@ -687,8 +704,6 @@ def billing_preflight(*, engine: str, model: str | None, policy: Any,
             return BillingDecision(False, "unsupported billing route; explicit credit spending is not authorised here", route)
         if engine in {"codex", "chatgpt"} and observed_auth_mode != "api_key":
             return BillingDecision(False, "explicit Codex API route requires observed api_key auth", route)
-        if auto_fallback_requested and not p["automatic_paid_fallback"]:
-            return BillingDecision(False, "automatic paid fallback is disabled", route)
         if task_spend_allowance_gbp is None:
             return BillingDecision(False, "paid API requires explicit task spend allowance", route)
         allowance = _decimal(task_spend_allowance_gbp, "allowance", positive=True)

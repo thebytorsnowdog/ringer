@@ -1,4 +1,4 @@
-"""Tests for subscription-first routing, pre-dispatch and mid-run usage-cap fallback to OpenRouter, and worker wrappers."""
+"""Tests that a subscription usage cap stops the route and does not spend OpenRouter."""
 from __future__ import annotations
 
 import asyncio
@@ -142,12 +142,12 @@ class QuotaFallbackTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    def test_mid_run_quota_failure_reverts_to_openrouter_and_notifies_user(self):
-        for sub_engine, sub_model, effort, expected_or_model in [
-            ("gemini", "gemini-3.8-flash-low", "low", "openrouter/z-ai/glm-5.3-flash"),
-            ("claude", "opus", "high", "openrouter/z-ai/glm-5.3"),
-            ("codex", "gpt-5.4", "medium", "openrouter/z-ai/glm-5.3"),
-            ("grok", "grok-4.7", "medium", "openrouter/z-ai/glm-5.3"),
+    def test_mid_run_quota_failure_stops_without_openrouter(self):
+        for sub_engine, sub_model, effort in [
+            ("gemini", "gemini-3.8-flash-low", "low"),
+            ("claude", "opus", "high"),
+            ("codex", "gpt-5.4", "medium"),
+            ("grok", "grok-4.7", "medium"),
         ]:
             with self.subTest(engine=sub_engine):
                 self.setUp()
@@ -174,35 +174,24 @@ class QuotaFallbackTests(unittest.TestCase):
                     err_buf = io.StringIO()
                     with redirect_stdout(out_buf), redirect_stderr(err_buf):
                         rc = asyncio.run(runner.run())
-                self.assertEqual(0, rc)
+                self.assertEqual(1, rc)
                 attempts = self._attempts()
-                self.assertEqual(2, len(attempts))
+                self.assertEqual(1, len(attempts))
                 self.assertEqual(sub_engine, attempts[0]["worker_engine"])
+                self.assertEqual(sub_model, attempts[0]["model"])
                 self.assertEqual("quota", attempts[0]["failure_class"])
-                self.assertEqual("openrouter", attempts[1]["worker_engine"])
-                self.assertEqual(expected_or_model, attempts[1]["model"])
-                self.assertEqual("PASS", attempts[1]["verdict"])
-
-                # Lifecycle event emitted
+                self.assertNotEqual("PASS", attempts[0]["verdict"])
                 q_events = [e for e in self._lifecycle_events() if e.get("event") == "quota_fallback"]
-                self.assertEqual(1, len(q_events))
-                qf = q_events[0]["quota_fallback"]
-                self.assertEqual(sub_engine, qf["original_engine"])
-                self.assertEqual("openrouter", qf["fallback_engine"])
-                self.assertEqual(expected_or_model, qf["fallback_model"])
-                self.assertEqual("mid_run", qf["trigger"])
-
-                # State file contains quota_fallback
+                self.assertEqual([], q_events)
                 state_obj = json.loads(runner.state_writer.path.read_text(encoding="utf-8"))
                 task_state = state_obj["tasks"][0]
-                self.assertIsNotNone(task_state.get("quota_fallback"))
-                self.assertEqual("openrouter", task_state["quota_fallback"]["fallback_engine"])
-
-                # Stderr banner + summary output + desktop notification
-                self.assertIn("USAGE CAP FALLBACK", err_buf.getvalue())
-                self.assertIn("usage cap fallbacks (reverted to OpenRouter):", out_buf.getvalue())
-                self.assertTrue(self.notify_log.exists())
-                self.assertIn("OpenRouter", self.notify_log.read_text(encoding="utf-8"))
+                self.assertIsNone(task_state.get("quota_fallback"))
+                self.assertEqual(sub_engine, task_state["engine"])
+                self.assertEqual("blocked", task_state["status"])
+                self.assertIn("OpenRouter was not selected", err_buf.getvalue())
+                self.assertNotIn("USAGE CAP FALLBACK", err_buf.getvalue())
+                self.assertNotIn("usage cap fallbacks", out_buf.getvalue())
+                self.assertFalse(self.notify_log.exists())
 
     def test_pre_dispatch_usage_cap_reverts_immediately_without_wasting_attempt(self):
         usage_file = self.usage_dir / "antigravity.json"
@@ -246,17 +235,17 @@ class QuotaFallbackTests(unittest.TestCase):
             err_buf = io.StringIO()
             with redirect_stdout(out_buf), redirect_stderr(err_buf):
                 rc = asyncio.run(runner.run())
-        self.assertEqual(0, rc)
-        attempts = self._attempts()
-        # Only 1 attempt ran, directly on openrouter!
-        self.assertEqual(1, len(attempts))
-        self.assertEqual("openrouter", attempts[0]["worker_engine"])
-        self.assertEqual("openrouter/z-ai/glm-5.3", attempts[0]["model"])
-        self.assertEqual("PASS", attempts[0]["verdict"])
+        self.assertEqual(1, rc)
+        self.assertEqual([], self._attempts())
+        self.assertEqual(0, runner.runtimes[0].attempts)
+        self.assertEqual("blocked", runner.runtimes[0].status)
+        self.assertEqual("quota", runner.runtimes[0].failure_class)
+        self.assertEqual("gemini", runner.runtimes[0].task.engine)
+        self.assertIn("OpenRouter was not selected", err_buf.getvalue())
+        self.assertNotIn("should-not-run", err_buf.getvalue())
         q_events = [e for e in self._lifecycle_events() if e.get("event") == "quota_fallback"]
-        self.assertEqual(1, len(q_events))
-        self.assertEqual("pre_dispatch", q_events[0]["quota_fallback"]["trigger"])
-        self.assertIn("USAGE CAP FALLBACK", err_buf.getvalue())
+        self.assertEqual([], q_events)
+        self.assertFalse((self.root / "work" / "task-one" / "out.txt").exists())
 
     def test_expired_usage_cap_window_does_not_trigger_pre_dispatch_fallback(self):
         usage_file = self.usage_dir / "antigravity.json"

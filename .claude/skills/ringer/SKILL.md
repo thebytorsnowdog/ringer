@@ -64,37 +64,21 @@ Lint catches unverifiable checks, silent checks, worktree deliverable/commit
 loss, serial fan-out, write collisions, and underspecified specs; `run`
 prints the same findings as non-blocking warnings.
 
-## Automatic use, originating-harness subscription routing, and OpenRouter usage-cap fallback
+## Automatic use and capability-aware subscription routing
 
 Use Ringer whenever the workflow benefits from it, without asking permission
 or requiring model-selection confirmation. The model/harness starting the
-request coordinates specs, checks, routing and review, and **must route Ringer
-worker tasks through its own native subscription engine first**
-(`billing_route: "subscription"`, `service_tier: "standard"`):
+request coordinates specs, checks, routing and review. Choose the native
+subscription harness that supports the provider (`billing_route: "subscription"`,
+`service_tier: "standard"`):
 
-- **Gemini / Antigravity host:** `engine: "gemini"` (uses `engines/gemini_worker.py` -> `agy` with Google AI Ultra subscription OAuth; models `gemini-4-argon-low`, `gemini-4-argon-medium`, `gemini-4-argon-high`, `gemini-3.8-flash-low`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-high`).
-- **Claude Code host:** `engine: "claude"` (`opus`, `sonnet`, `haiku`).
-- **Codex host:** `engine: "codex"` (`gpt-5.4` / configured Codex subscription slugs).
-- **Grok host:** `engine: "grok"` (`grok-4.7`).
-- **Hermes host:** use the active subscription engine for the session (`gemini`, `claude`, `codex`, or `grok`).
+- **Codex host, OpenAI models:** `engine: "codex"`. Subscription auth is ChatGPT login, not an OpenAI API key and not OpenAI API credit balance. API use is a separate `billing_route: "api"` with observed `api_key` auth. Codex does not require OpenCode.
+- **Grok host, xAI models:** `engine: "grok"` via `grok login` OAuth. That session does not authenticate OpenAI, Gemini, or OpenRouter.
+- **Gemini / Antigravity host, Google models:** `engine: "gemini"` (`engines/gemini_worker.py` execs `agy` and strips Gemini API keys). The `gemini` CLI is not this harness.
+- **Claude Code host, Anthropic models:** `engine: "claude"` (`opus`, `sonnet`, `haiku`).
+- **Hermes host:** use the subscription engine for the provider in play.
 
-**Automatic OpenRouter fallback on usage cap:**
-If a subscription task hits a usage cap—either **pre-dispatch** (when
-`~/.local/state/omarchy/agents/usage/<agent>.json` reports `percent >= 1.0`
-with a non-expired `resetsAt`, or billing admission reports `quota`) or
-**mid-run** (when a worker attempt fails with `failure_class == "quota"` /
-`ResourceExhausted` / rate-limit exhaustion)—Ringer automatically reverts the
-task to `engine: "openrouter"` (`billing_route: "api"`, backed by
-`engines/openrouter_worker.py` and `~/.config/ringer/openrouter.key`)
-so the workflow continues without failing the job.
-
-**Mandatory user notification on fallback:**
-When fallback triggers, Ringer records `quota_fallback` in the run state JSON
-and `lifecycle.jsonl`, prints a `[ringer.py] USAGE CAP FALLBACK` banner and
-summary section, and sends a desktop notification (`notify-send`). The
-coordinating agent **must also explicitly tell the user in its response**
-which task(s) hit the subscription usage cap and which OpenRouter model was
-used to complete the work.
+**No automatic OpenRouter fallback.** A usage cap, missing binary, auth failure, or provider error stops the route. Do not rewrite the task to `engine: "openrouter"` or `engine: "opencode"`. A cost-policy cap and `automatic_paid_fallback` are not approval to spend. OpenRouter is allowed only when the task names that engine, an `openrouter/` model, `billing_route: "api"`, and a spend allowance. If `opencode-sandboxed.sh` is executable but `opencode` is missing, that explicit route fails before spend and stays on OpenCode. Tell the user it stopped.
 
 Choices within existing authority are coordinator decisions. Ask only for
 genuinely missing authority. Preserve executable checks, sandbox confinement,

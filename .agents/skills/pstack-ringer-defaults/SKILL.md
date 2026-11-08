@@ -22,13 +22,12 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
 ## 2. Who does what
 
 - **Implementation, probes, review scouts, personas, mechanical edits** go through Ringer, automatically, without asking permission or model-selection confirmation. Tell Ian what was chosen and why.
-- **Worker routing (originating-harness subscription first, OpenRouter usage-cap fallback).** Active subscriptions consolidate to **Antigravity (`engine: "gemini"`)** and **Grok (`engine: "grok"`)** as the primary continuing subscription harnesses, with Claude Code and Codex subscriptions retiring on 6 November 2026. Always start Ringer tasks on the model/harness initiating the request using its subscription tokens (`billing_route: "subscription"`, `service_tier: "standard"`):
-  - When coordinating from **Gemini / Antigravity** (primary continuing subscription): use `engine: "gemini"` (Antigravity CLI `agy` subscription worker, e.g. `gemini-4-argon-medium`, `gemini-4-argon-high`, or `gemini-3.8-flash-low`).
-  - When coordinating from **Grok** (primary continuing subscription): use `engine: "grok"` (Grok subscription worker, e.g. `grok-4.7`).
-  - When coordinating from **Claude Code** (retiring 6 November 2026): use `engine: "claude"` (Claude Code subscription worker, e.g. `opus` or `sonnet`).
-  - When coordinating from **Codex** (retiring 6 November 2026): use `engine: "codex"` (Codex subscription worker, e.g. `gpt-5.4`).
-  - All subscription engines are bwrap-sandboxed with isolated runtime dirs and forward `--effort`.
-  - **Automatic usage-cap fallback to OpenRouter:** If the subscription engine hits its usage cap (either pre-dispatch via `~/.local/state/omarchy/agents/usage/<agent>.json` at `percent >= 1.0` with a future `resetsAt`, or mid-run when `failure_class == "quota"`), Ringer automatically reverts the task to `engine: "openrouter"` (`billing_route: "api"`, authenticated via `~/.config/ringer/openrouter.key`) so the work continues without stopping. Ringer emits a stderr notice, a run summary section, a `quota_fallback` lifecycle event + HUD state badge, and an Omarchy desktop notification (`notify-send`), and **the coordinator must explicitly inform the user in its response** that the subscription usage cap was reached and work continued on OpenRouter.
+- **Worker routing (native subscription for the provider, no OpenRouter fallback).** Use the harness that can actually authenticate the provider (`billing_route: "subscription"`, `service_tier: "standard"`). Codex subscription auth is ChatGPT login and is not OpenAI API credit. Grok OAuth does not authenticate OpenAI or Gemini. Gemini subscription is the Antigravity `agy` CLI, and its worker strips API keys.
+  - From **Codex**: `engine: "codex"`. Do not require OpenCode.
+  - From **Grok**: `engine: "grok"`.
+  - From **Gemini / Antigravity**: `engine: "gemini"` (`agy`).
+  - From **Claude Code**: `engine: "claude"`.
+  - A usage cap, missing CLI, auth failure, or provider error stops that route. Do not switch to OpenRouter. `automatic_paid_fallback` and a budget cap are not spending approval. OpenRouter is a separate explicit task: `engine: "opencode"` or `engine: "openrouter"`, an `openrouter/` model, `billing_route: "api"`, and a spend allowance. Tell Ian when a route stops.
 - **Model-fit assessment before every model job.** Assessment is NOT user approval. Before selecting OpenRouter candidates, review catalogue and task-family evidence; refresh missing or >24h-old assessment with `python3 scripts/assess_openrouter.py --refresh --out ~/.ringer/model-assessment` (see `docs/MODEL-EVALUATION.md`). Catalogue compatibility does not prove quality. Exploration is optional. Global promotion requires 30 distinct jobs per family, 75% first-try and 85% final-check passes, plus human review.
 - **Judgement panels** (`architect` exploration, `interrogate`, arena cross-judge, picking a base) need model diversity, and their output is a decision, not a checkable artefact. From Antigravity, run them as Ringer `adversarial-review` jobs across the configured subscription workers. Inside Claude Code, pstack's own frontier dispatch is fine.
 - **Arena on code** is split. Candidates are Ringer tasks (same spec, different models, separate worktrees). Judging, picking and grafting stay with the coordinator plus the pstack cross-judge.
@@ -65,7 +64,7 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
 
 ## 5. Host adapters
 
-Antigravity (`engine: "gemini"`) and Grok (`engine: "grok"`) are the primary continuing subscription harnesses; Claude Code and Codex subscriptions retire on 6 November 2026, while OpenRouter automatic usage-cap fallback remains active across all Ringer runs.
+Codex, Grok, Gemini, and Claude each keep their own subscription auth. OpenRouter is never an automatic fallback.
 
 | Host | pstack | Ringer |
 |---|---|---|

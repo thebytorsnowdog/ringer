@@ -249,6 +249,42 @@ class WorkerWritePreflightTests(unittest.TestCase):
         self.assertEqual("permission", runtime.failure_class)
         self.assertEqual(0, runtime.attempts)
 
+    def test_every_restricted_harness_denies_the_same_outside_write(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        commands = {
+            "opencode": ["opencode-sandboxed.sh", str(self.taskdir), "run", "spec"],
+            "grok": ["grok", "--sandbox", "workspace", "-p", "spec"],
+            "agy": ["agy", "-p", "spec"],
+            "claude": ["claude", "-p", "spec"],
+        }
+        for name, command in commands.items():
+            with self.subTest(engine=name):
+                task = self.contract([outside], command, restricted=False)
+                task.restricted_worker = True
+                failure, message = preflight_local(task, self.taskdir)
+                self.assertEqual("permission", failure)
+                self.assertIn("outside the worker write scope", message)
+                inside = self.contract([self.taskdir], command, restricted=False)
+                inside.restricted_worker = True
+                self.assertEqual((None, ""), preflight_local(inside, self.taskdir))
+
+    def test_opencode_writable_root_is_the_only_extra_grant(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        granted = self.contract(
+            [outside],
+            ["opencode-sandboxed.sh", str(self.taskdir), "--writable-root", str(outside), "run", "spec"],
+            restricted=False,
+        )
+        granted.restricted_worker = True
+        self.assertEqual((None, ""), preflight_local(granted, self.taskdir))
+        bypass = self.contract([], ["opencode-sandboxed.sh", "--no-sandbox", "run", "spec"], restricted=False)
+        bypass.restricted_worker = True
+        failure, message = preflight_local(bypass, self.taskdir)
+        self.assertEqual("permission", failure)
+        self.assertIn("sandbox bypass requires full_access", message)
+
 
 if __name__ == "__main__":
     unittest.main()

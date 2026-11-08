@@ -516,7 +516,10 @@ class AskBillingTests(unittest.TestCase):
             'print("RAW LOCAL FIXTURE")\n')
         self.binary.chmod(0o755)
         self.policy = self.root / 'policy.json'
-        self.policy.write_text(json.dumps(dict(monthly_api_cap_gbp=0, run_api_cap_gbp=0)))
+        self.policy.write_text(json.dumps(dict(
+            monthly_api_cap_gbp=0, run_api_cap_gbp=0,
+            fx=dict(usd_to_gbp='0.8', dated='2026-11-08'),
+        )))
         self.config = ringer.AppConfig(path=None, identity_default='fixture', state_dir=self.root/'state',
             require_model_assessment=True,
             dashboard_port_base=18787, hud_port=18788, hud_app_path=None, allow_full_access=False,

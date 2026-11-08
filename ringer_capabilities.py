@@ -439,3 +439,27 @@ def inventory_engines(
             continue
         found.append(name)
     return tuple(found)
+
+
+def parallelism_reason(tasks: Any) -> str:
+    """Say whether these tasks can share a swarm. Does not raise max_parallel."""
+    items = list(tasks)
+    if len(items) <= 1:
+        return "One task, and ask, stay a single worker."
+    shared: dict[str, list[str]] = {}
+    for task in items:
+        key = str(getattr(task, "key", ""))
+        paths = list(getattr(task, "preflight_write_paths", ()) or ())
+        paths.extend(
+            path for path in getattr(task, "expect_files", ()) or ()
+            if str(path).startswith("/")
+        )
+        for path in paths:
+            shared.setdefault(str(path), []).append(key)
+    collisions = [keys for keys in shared.values() if len(keys) >= 2]
+    if collisions:
+        return "Shared write paths stay serial. A swarm must not share a write root."
+    return (
+        "Independent tasks are a swarm: set max_parallel above 1. "
+        "Parallelism does not authorise a paid route or a missing harness."
+    )

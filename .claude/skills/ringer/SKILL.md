@@ -43,9 +43,9 @@ description: >-
    `--no-dashboard` except in automated tests or when the user explicitly
    asks.
 
-Ringer runs manifest tasks in parallel across cheap CLI workers (Codex,
-OpenCode/GLM, others via config) and verifies every task by **executing a
-check command**. A product PASS requires an executed passing check and the
+Ringer runs independent manifest tasks as a verified parallel swarm on
+whatever installed harness can authenticate the provider. OpenCode is only
+the explicit OpenRouter route. A product PASS requires an executed passing check and the
 declared file contract. Only product or missing-deliverable failures retry once
 by default, with the actual check failure in the retry prompt. You —
 the orchestrating model — pay tokens only for specs, orchestration, and
@@ -64,6 +64,14 @@ Lint catches unverifiable checks, silent checks, worktree deliverable/commit
 loss, serial fan-out, write collisions, and underspecified specs; `run`
 prints the same findings as non-blocking warnings.
 
+## Default shape: a verified swarm
+
+Independent tasks run together. Set `max_parallel` above 1 when write roots
+do not overlap. One task stays one worker. `ask` stays one read-only worker.
+Tasks that share a write root stay serial. A swarm picks workers that are
+actually installed and authenticated for the provider. It does not install a
+missing CLI, and it does not authorise OpenRouter or any other paid route.
+
 ## Automatic use and capability-aware subscription routing
 
 Use Ringer whenever the workflow benefits from it, without asking permission
@@ -78,7 +86,9 @@ subscription harness that supports the provider (`billing_route: "subscription"`
 - **Claude Code host, Anthropic models:** `engine: "claude"` (`opus`, `sonnet`, `haiku`).
 - **Hermes host:** use the subscription engine for the provider in play.
 
-**No automatic OpenRouter fallback.** A usage cap, missing binary, auth failure, or provider error stops the route. Do not rewrite the task to `engine: "openrouter"` or `engine: "opencode"`. A cost-policy cap and `automatic_paid_fallback` are not approval to spend. OpenRouter is allowed only when the task names that engine, an `openrouter/` model, `billing_route: "api"`, and a spend allowance. If `opencode-sandboxed.sh` is executable but `opencode` is missing, that explicit route fails before spend and stays on OpenCode. Tell the user it stopped.
+**No automatic OpenRouter fallback.** A usage cap, missing binary, auth failure, or provider error stops the route. Do not rewrite the task to `engine: "openrouter"` or `engine: "opencode"`. A cost-policy cap and `automatic_paid_fallback` are not approval to spend.
+
+**Planned GLM/DeepSeek delegation** is a separate choice, recorded in `docs/DELEGATION-MATRIX.md`. Ian approved it at `2026-11-08T21:11:00Z` for the two flash shortlist models only, within £10 in a month, £1 for a swarm run, and £0.25 for one worker task, with no automatic paid retry. Coordinator review stays on the native subscription route. A stale USD-to-GBP rate or a missing `opencode` binary still refuses dispatch. Do not install the CLI.
 
 Choices within existing authority are coordinator decisions. Ask only for
 genuinely missing authority. Preserve executable checks, sandbox confinement,

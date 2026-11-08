@@ -27,6 +27,7 @@ from ringer_capabilities import (
     choose_unspecified_route,
     inventory_engines,
     missing_runtime_dependencies,
+    parallelism_reason,
     subscription_probe,
 )
 from ringer_costs import billing_preflight
@@ -58,6 +59,42 @@ def _snapshot(used: int = 10) -> dict:
             }
         },
     }
+
+
+class SwarmInstructionTests(unittest.TestCase):
+    def test_coordinator_copies_default_to_a_swarm_without_an_opencode_mandate(self) -> None:
+        agents = (ROOT / ".agents/skills/ringer/SKILL.md").read_text(encoding="utf-8")
+        claude = (ROOT / ".claude/skills/ringer/SKILL.md").read_text(encoding="utf-8")
+        defaults = (ROOT / ".agents/skills/pstack-ringer-defaults/SKILL.md").read_text(encoding="utf-8")
+        prompt = (ROOT / ".agents/skills/ringer/agents/openai.yaml").read_text(encoding="utf-8")
+        for text in (agents, claude, defaults):
+            self.assertIn("Independent tasks", text)
+            self.assertIn("max_parallel", text)
+            self.assertIn("share a write root", text)
+            self.assertTrue("does not install" in text or "are not installed" in text)
+            self.assertNotIn("OpenCode/OpenRouter swarm", text)
+        self.assertIn("stay serial", defaults)
+        self.assertIn("Run verified parallel Ringer swarms", prompt)
+        self.assertNotIn("OpenCode", prompt)
+        self.assertIn("ask", agents)
+        self.assertNotIn("Codex model stays in the coordinator seat", agents)
+
+    def test_parallelism_stays_serial_for_one_task_and_shared_writes(self) -> None:
+        one = parallelism_reason([type("T", (), {"key": "only", "preflight_write_paths": (), "expect_files": ()})()])
+        self.assertIn("single worker", one)
+        shared = "/tmp/same-root"
+        tasks = [
+            type("T", (), {"key": "a", "preflight_write_paths": (shared,), "expect_files": ()})(),
+            type("T", (), {"key": "b", "preflight_write_paths": (shared,), "expect_files": ()})(),
+        ]
+        self.assertIn("serial", parallelism_reason(tasks))
+        independent = [
+            type("T", (), {"key": "a", "preflight_write_paths": (), "expect_files": ("a.txt",)})(),
+            type("T", (), {"key": "b", "preflight_write_paths": (), "expect_files": ("b.txt",)})(),
+        ]
+        reason = parallelism_reason(independent)
+        self.assertIn("swarm", reason)
+        self.assertIn("does not authorise a paid route", reason)
 
 
 class CapabilityMatrixTests(unittest.TestCase):
@@ -295,6 +332,7 @@ class DispatchFailureTests(unittest.TestCase):
             "run_api_cap_gbp": "5",
             "automatic_paid_fallback": True,
             "subscription_auth_modes": ["chatgpt"],
+            "fx": {"usd_to_gbp": "0.8", "dated": "2026-11-08"},
         }), encoding="utf-8")
         return path
 

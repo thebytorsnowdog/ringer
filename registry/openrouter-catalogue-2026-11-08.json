@@ -1,0 +1,41 @@
+{
+  "schema": "ringer-openrouter-catalogue/v1",
+  "source": "https://openrouter.ai/api/v1/models",
+  "fetched_on": "2026-11-08",
+  "price_unit": "USD per token",
+  "note": "Catalogue facts from the public models list. Not a quality ranking and not an approval to spend.",
+  "models": {
+    "z-ai/glm-5.3-flash": {
+      "prompt": "0.0000000335",
+      "completion": "0.000000083",
+      "context_length": 1048576,
+      "supports_tools": true,
+      "supports_reasoning": true,
+      "on_initial_shortlist": true
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "prompt": "0.000000051",
+      "completion": "0.000000567",
+      "context_length": 1048576,
+      "supports_tools": true,
+      "supports_reasoning": true,
+      "on_initial_shortlist": true
+    },
+    "z-ai/glm-5.3": {
+      "prompt": "0.0000000699",
+      "completion": "0.0000014",
+      "context_length": 1048576,
+      "supports_tools": true,
+      "supports_reasoning": true,
+      "on_initial_shortlist": false
+    },
+    "deepseek/deepseek-v4-pro": {
+      "prompt": "0.0000002088",
+      "completion": "0.0000004176",
+      "context_length": 1048576,
+      "supports_tools": true,
+      "supports_reasoning": true,
+      "on_initial_shortlist": false
+    }
+  }
+}

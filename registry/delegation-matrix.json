@@ -1,0 +1,53 @@
+{
+  "schema": "ringer-delegation-matrix/v1",
+  "status": "approved-bounded-delegation",
+  "approval": {
+    "id": "user-chat-2026-11-08T21:11:00Z",
+    "recorded_at": "2026-11-08T21:11:00Z",
+    "source": "user chat",
+    "text": "I approve automatic GLM/DeepSeek OpenRouter delegation within £10 per month, £1 total per swarm run and £0.25 per worker task, with no automatic paid retries.",
+    "monthly_gbp": "10",
+    "run_gbp": "1",
+    "task_gbp": "0.25",
+    "paid_retries": false
+  },
+  "fx_max_age_days": 14,
+  "conservative_budget": {
+    "input_tokens": 200000,
+    "output_tokens": 64000,
+    "judgment": "A bounded-task hold used when the task does not name a smaller token budget. Not a measured usage figure."
+  },
+  "shortlist": [
+    {
+      "canonical": "openrouter/z-ai/glm-5.3-flash",
+      "aliases": ["z-ai/glm-5.3-flash"]
+    },
+    {
+      "canonical": "openrouter/deepseek/deepseek-v4.1-flash",
+      "aliases": ["deepseek/deepseek-v4.1-flash"]
+    }
+  ],
+  "classes": [
+    {
+      "id": "bounded-detail",
+      "complexity": "bounded",
+      "risk": "low",
+      "eligible_routes": ["subscription", "explicit_openrouter"],
+      "judgment": "A native subscription coordinator may plan a shortlist worker for detailed but bounded work. This is not a quality ranking."
+    },
+    {
+      "id": "coordination",
+      "complexity": "open",
+      "risk": "high",
+      "eligible_routes": ["subscription"],
+      "judgment": "Coordinator review stays on the native subscription route."
+    },
+    {
+      "id": "consequential",
+      "complexity": "open",
+      "risk": "high",
+      "eligible_routes": ["subscription"],
+      "judgment": "Auth, money, deletion, and publication stay on the native subscription route."
+    }
+  ]
+}

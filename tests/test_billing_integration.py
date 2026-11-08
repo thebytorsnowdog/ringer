@@ -115,8 +115,8 @@ class BillingIntegrationTests(unittest.TestCase):
 
     def opencode_runner(self, route='api', *, enabled=True, **fields):
         task = dict(key='one', spec='Write out.txt with the requested result.', engine='opencode',
-                    model='openrouter/z-ai/glm-5.2', billing_route=route,
-                    task_spend_allowance_gbp=1, check='test -s out.txt', expect_files=['out.txt'])
+                    model='openrouter/z-ai/glm-5.3-flash', billing_route=route,
+                    task_spend_allowance_gbp=0.25, check='test -s out.txt', expect_files=['out.txt'])
         task.update(fields)
         manifest = ringer.Manifest.from_obj(dict(run_name='opencode-billing-test', workdir=str(self.root/'work'), tasks=[task]))
         engine = ringer.EngineConfig(name='opencode', bin=str(self.binary),
@@ -237,10 +237,12 @@ class BillingIntegrationTests(unittest.TestCase):
         self.assertFalse((self.root/'workers').exists())
 
     def test_opencode_explicit_api_route_reserves_without_an_account_probe(self):
+        self.policy.write_text(json.dumps(dict(monthly_api_cap_gbp=10, run_api_cap_gbp=5,
+            fx=dict(usd_to_gbp='0.8', dated='2026-11-08'))))
         runner = self.opencode_runner()
         self.assertEqual(0, asyncio.run(runner.run()))
         argv = json.loads((self.root/'worker-argv.json').read_text())
-        self.assertEqual(['run', '--model', 'openrouter/z-ai/glm-5.2'], argv[:3])
+        self.assertEqual(['run', '--model', 'openrouter/z-ai/glm-5.3-flash'], argv[:3])
         self.assertFalse((self.root/'admissions').exists())
         row = self.rows()[0]
         self.assertEqual(('api', None, 'unresolved'),
@@ -262,7 +264,10 @@ class BillingIntegrationTests(unittest.TestCase):
                 self.assertFalse((self.root/'admissions').exists())
 
     def test_opencode_api_route_enforces_the_monthly_and_run_allowance_caps(self):
-        self.policy.write_text(json.dumps(dict(monthly_api_cap_gbp='.5', run_api_cap_gbp=5)))
+        self.policy.write_text(json.dumps(dict(
+            monthly_api_cap_gbp='0.0000001', run_api_cap_gbp=5,
+            fx=dict(usd_to_gbp='0.8', dated='2026-11-08'),
+        )))
         runner = self.opencode_runner()
         self.assertEqual(1, asyncio.run(runner.run()))
         self.assertEqual(0, runner.runtimes[0].attempts)

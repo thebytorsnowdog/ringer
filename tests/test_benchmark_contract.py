@@ -379,12 +379,15 @@ class BenchmarkContractTests(unittest.TestCase):
     def test_generated_paid_allowance_cannot_override_zero_local_cap(self):
         import ringer_billing
         out = self.directory / 'paid-zero-cap'
-        result = cli('generate', '--out', out, '--models', 'opencode:openrouter/z-ai/glm-5.2',
+        result = cli('generate', '--out', out, '--models', 'opencode:openrouter/z-ai/glm-5.3-flash',
                      '--cases', '1', '--task-spend-allowance-gbp', '0.25')
         self.assertEqual(0, result.returncode, result.stderr)
         task = ringer.Manifest.from_path(out / 'manifest.json').tasks[0]
         policy = self.directory / 'policy.json'
-        policy.write_text(json.dumps({'monthly_api_cap_gbp': 0, 'run_api_cap_gbp': 1}))
+        policy.write_text(json.dumps({
+            'monthly_api_cap_gbp': 0, 'run_api_cap_gbp': 1,
+            'fx': {'usd_to_gbp': '0.8', 'dated': '2026-11-08'},
+        }))
         admission, _ = asyncio.run(ringer_billing.admit(policy_path=policy, engine=task.engine,
             binary='unused-local-fixture', model=task.model, route=task.billing_route,
             allowance=task.task_spend_allowance_gbp, command=['unused-local-fixture', 'run', '--model', task.model, task.spec],

@@ -522,6 +522,43 @@ def _path_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+def _sandbox_bypass(command: list[str]) -> bool:
+    """True when the argv turns off the engine's own containment."""
+    if "--dangerously-bypass-approvals-and-sandbox" in command or "--no-sandbox" in command:
+        return True
+    for index, item in enumerate(command):
+        if item == "--sandbox" and index + 1 < len(command) and command[index + 1] == "off":
+            return True
+        if item == "--permission-mode" and index + 1 < len(command) and command[index + 1] == "bypassPermissions":
+            return True
+    return False
+
+
+def _declared_write_grants(command: list[str]) -> tuple[str | None, list[Path]]:
+    """Extra write roots a command explicitly grants. The task directory is separate."""
+    roots: list[Path] = []
+    index = 0
+    while index < len(command):
+        item = command[index]
+        if item in {"--writable-root", "--add-dir"}:
+            if index + 1 >= len(command):
+                return f"{item} requires a directory", []
+            path = Path(command[index + 1])
+            if not path.is_absolute():
+                return f"{item} must be an absolute directory: {command[index + 1]}", []
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError as exc:
+                return f"granted write root is unavailable: {path}: {exc}", []
+            if not resolved.is_dir():
+                return f"granted write root is not a directory: {resolved}", []
+            roots.append(resolved)
+            index += 2
+            continue
+        index += 1
+    return None, roots
+
+
 def preflight_local(task: Any, taskdir: Path) -> tuple[str | None, str]:
     """Check only declared inputs and obvious interpreter scripts, never inferred dependencies."""
     for name in task.preflight_files:
@@ -547,25 +584,36 @@ def preflight_local(task: Any, taskdir: Path) -> tuple[str | None, str]:
             return "missing_dependency", f"preflight write path is not a directory: {resolved}"
         write_paths.append(resolved)
     worker_command = list(getattr(task, "worker_command", []) or [])
-    if (
-        getattr(task, "restricted_codex", False)
-        and "--dangerously-bypass-approvals-and-sandbox" in worker_command
-    ):
-        return "permission", "Codex sandbox bypass requires full_access"
-    if getattr(task, "restricted_codex", False) and write_paths:
-        error, roots = _codex_workspace_write_roots(worker_command)
-        if error:
-            return "permission", error
+    restricted = bool(getattr(task, "restricted_worker", False) or getattr(task, "restricted_codex", False))
+    if restricted and _sandbox_bypass(worker_command):
+        if "--dangerously-bypass-approvals-and-sandbox" in worker_command:
+            return "permission", "Codex sandbox bypass requires full_access"
+        return "permission", "sandbox bypass requires full_access"
+    if restricted and write_paths:
         task_root = taskdir.resolve(strict=True)
-        allowed_roots = [task_root, *roots]
+        if getattr(task, "restricted_codex", False):
+            error, roots = _codex_workspace_write_roots(worker_command)
+            if error:
+                return "permission", error
+            allowed_roots = [task_root, *roots]
+            outside_message = (
+                "preflight write path is outside the resolved Codex workspace-write sandbox: {path}; "
+                "forward it with engine_args as -c "
+                'sandbox_workspace_write.writable_roots=["/absolute/source/dir"]'
+            )
+        else:
+            error, roots = _declared_write_grants(worker_command)
+            if error:
+                return "permission", error
+            allowed_roots = [task_root, *roots]
+            outside_message = (
+                "preflight write path is outside the worker write scope: {path}. "
+                "The task directory is the shared write root. An extra root has to be "
+                "an absolute directory granted on the command with --writable-root or --add-dir."
+            )
         for path in write_paths:
             if not any(_path_within(path, root) for root in allowed_roots):
-                return (
-                    "permission",
-                    f"preflight write path is outside the resolved Codex workspace-write sandbox: {path}; "
-                    "forward it with engine_args as -c "
-                    'sandbox_workspace_write.writable_roots=[\"/absolute/source/dir\"]',
-                )
+                return "permission", outside_message.format(path=path)
     for path in write_paths:
         fd, probe = tempfile.mkstemp(prefix=".ringer-write-probe-", dir=path)
         os.close(fd)

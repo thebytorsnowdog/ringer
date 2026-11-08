@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ringer_costs import SpendLedger, billing_preflight, estimate_event, parse_usage_lines, validate_cost_policy
+from ringer_delegation import prepare_openrouter_dispatch
 
 
 def task_billing_fields(obj: dict[str, Any], key: str) -> dict[str, Any]:
@@ -297,6 +298,14 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
         if route == "api" and "run_api_cap_gbp" not in policy:
             return blocked("paid API requires an explicit run_api_cap_gbp", "unknown")
         if engine in {"opencode", "openrouter"}:
+            planned = prepare_openrouter_dispatch(
+                model=model, allowance=allowance, attempt=attempt, policy=policy,
+            )
+            evidence.update(planned.evidence())
+            if not planned.allowed or planned.policy is None or planned.reserve_gbp is None:
+                return blocked(planned.reason, planned.failure_class)
+            allowance = planned.reserve_gbp
+            policy = planned.policy
             # An OpenRouter route is always chargeable.  Do not read, infer or
             # alter credentials while deciding whether its local budget permits
             # dispatch.

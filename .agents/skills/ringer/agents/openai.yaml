@@ -1,4 +1,4 @@
 interface:
   display_name: "Ringer Orchestrator"
-  short_description: "Run verified OpenCode worker swarms"
-  default_prompt: "Use $ringer to turn this job into a checked OpenCode/OpenRouter swarm and review the executed results."
+  short_description: "Run verified parallel Ringer swarms"
+  default_prompt: "Use $ringer to turn independent work into a checked parallel swarm on installed, authenticated harnesses, keep shared writes serial, and review the executed results."

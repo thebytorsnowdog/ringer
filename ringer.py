@@ -53,6 +53,7 @@ from ringer_capabilities import (
     assess_explicit_route,
     missing_runtime_dependencies,
     missing_runtime_message,
+    parallelism_reason,
     quota_stop_message,
 )
 from ringer_reliability import (
@@ -2074,6 +2075,7 @@ def lint_manifest(
 
     if len(manifest.tasks) >= 3 and manifest.max_parallel == 1:
         findings.append("manifest: tasks will run serially; set max_parallel.")
+        findings.append(parallelism_reason(manifest.tasks))
 
     if not manifest.worktrees:
         # Relative expect_files resolve inside each task's own directory and
@@ -9292,6 +9294,7 @@ class RingerRunner:
             )
         }
         local_contract.update(
+            restricted_worker=not task.full_access,
             restricted_codex=(task.engine == DEFAULT_ENGINE_NAME and not task.full_access),
             worker_command=runtime.prepared_command[0],
         )
@@ -9465,7 +9468,12 @@ class RingerRunner:
                         runtime,
                         "subscription usage cap or rate limit hit during the worker attempt",
                     )
-                if should_retry(runtime.failure_class, runtime.task, attempt, verdict):
+                if runtime.task.engine in {"opencode", "openrouter"} and verdict != "PASS":
+                    append_text(
+                        runtime.log_path,
+                        "[ringer.py] no automatic paid retry. A later attempt needs a new approved delegation.\n",
+                    )
+                elif should_retry(runtime.failure_class, runtime.task, attempt, verdict):
                     failure_context = build_failure_context(runtime.log_path, verify.raw_output_excerpt)
                     current_spec = f"{runtime.task.spec}\n\nPrevious attempt failed: {failure_context}. Fix it."
                     attempt += 1

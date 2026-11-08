@@ -12,10 +12,6 @@ ringer skill), append one dated line under the model. Say the task type,
 what happened, and what you'd do differently. Only write what the executed
 checks and raw logs support — no vibes, no worker self-reports.
 
-## routing (harness bug, not a model score)
-
-- 2026-11-08 — Reproduced at repo head, without a live model call. `preflight_engine_bins` accepted an executable `engines/opencode-sandboxed.sh` while `opencode` was absent from PATH. The wrapper then exited 127 with `opencode-sandboxed.sh: opencode not found on PATH`. A task that names that wrapper can reach billing admission before the missing CLI is visible. Separately, `select_openrouter_fallback_model` raised `AttributeError: 'NoneType' object has no attribute 'get'` when `role_candidates` was JSON null. The runner no longer spends via that fallback. An explicit OpenCode task fails before reservation when the CLI is missing, and a Codex task does not look for `opencode`.
-
 ## codex (GPT-5-class, own harness)
 
 - Strongest general worker; the default engine. Spend reasoning effort per

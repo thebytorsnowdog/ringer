@@ -30,8 +30,70 @@ class HarnessCapability:
     providers: frozenset[str]
     subscription_auth: str | None
     api_auth: str | None
-    billing_observes_auth: bool
     note: str
+
+
+@dataclass(frozen=True)
+class SubscriptionProbe:
+    """Whether admission can observe this harness's native subscription.
+
+    ``supported`` is true only for a probe this repository actually runs.
+    An engine name, a binary on PATH, or an API-key environment variable is
+    not that probe.
+    """
+
+    engine: str
+    supported: bool
+    reason: str
+
+
+def subscription_probe(engine: str) -> SubscriptionProbe:
+    """Return the auth observation this process is allowed to perform.
+
+    The function reads no environment variables and no credential files.
+    """
+    if engine == "codex":
+        return SubscriptionProbe(
+            "codex",
+            True,
+            "Codex subscription evidence is the app-server account/read reply "
+            "with refreshToken false, reduced to auth type chatgpt and quota "
+            "windows. An api_key reply is a different login and is not "
+            "ChatGPT subscription credit.",
+        )
+    if engine == "grok":
+        return SubscriptionProbe(
+            "grok",
+            False,
+            "Grok subscription admission is not implemented. The published CLI "
+            "reference lists grok login, grok logout, and grok models, and does "
+            "not define a headless status that separates SuperGrok OAuth from an "
+            "XAI_API_KEY session. A successful grok models exit and the "
+            "XAI_API_KEY variable are not subscription evidence. "
+            "~/.grok/auth.json is not read.",
+        )
+    if engine == "gemini":
+        return SubscriptionProbe(
+            "gemini",
+            False,
+            "Antigravity agy subscription admission is not implemented. "
+            "Documented sign-in uses the OS keyring or an interactive browser "
+            "flow, and the command list has no headless auth-status command. "
+            "GEMINI_API_KEY and GOOGLE_API_KEY are not this subscription. "
+            "The keyring is not read.",
+        )
+    if engine == "claude":
+        return SubscriptionProbe(
+            "claude",
+            False,
+            "Claude subscription admission is not implemented. The claude "
+            "engine name is not observed subscription evidence.",
+        )
+    return SubscriptionProbe(
+        engine,
+        False,
+        f"No subscription probe is implemented for {engine}.",
+    )
 
 
 # Auth names below are the ones this repository actually implements or documents.
@@ -43,7 +105,6 @@ HARNESSES: dict[str, HarnessCapability] = {
         providers=frozenset({"openai"}),
         subscription_auth="chatgpt",
         api_auth="api_key",
-        billing_observes_auth=True,
         note=(
             "Codex subscription is ChatGPT login (account type chatgpt, "
             "forced_login_method chatgpt). Codex API is a separate observed "
@@ -56,12 +117,11 @@ HARNESSES: dict[str, HarnessCapability] = {
         providers=frozenset({"xai"}),
         subscription_auth="grok_cli_oauth",
         api_auth=None,
-        billing_observes_auth=False,
         note=(
-            "Grok subscription is the grok CLI OAuth plan from grok login "
-            "(SuperGrok or X Premium Plus, as documented for this engine). "
-            "Ringer billing admission does not observe that session. This "
-            "harness does not accept an OpenAI, Gemini, or OpenRouter credential."
+            "Grok's documented login is grok login on a SuperGrok or X Premium "
+            "Plus plan. That OAuth session is not an OpenAI, Gemini, or "
+            "OpenRouter credential. config.sample.toml records that Grok's JSON "
+            "usage fields do not establish subscription coverage."
         ),
     ),
     "gemini": HarnessCapability(
@@ -69,12 +129,10 @@ HARNESSES: dict[str, HarnessCapability] = {
         providers=frozenset({"google"}),
         subscription_auth="agy_google_oauth",
         api_auth=None,
-        billing_observes_auth=False,
         note=(
-            "Gemini subscription is the Antigravity CLI agy with Google OAuth. "
+            "Gemini subscription is the Antigravity CLI agy. "
             "engines/gemini_worker.py removes GEMINI_API_KEY and GOOGLE_API_KEY "
-            "before exec, so this harness has no API-key route. The gemini CLI "
-            "is a different program. Ringer billing admission does not observe agy."
+            "before exec. The gemini CLI is a different program."
         ),
     ),
     "claude": HarnessCapability(
@@ -82,11 +140,9 @@ HARNESSES: dict[str, HarnessCapability] = {
         providers=frozenset({"anthropic"}),
         subscription_auth="claude_cli",
         api_auth=None,
-        billing_observes_auth=False,
         note=(
-            "Claude is a native subscription engine in this tree. Ringer billing "
-            "admission does not observe a Claude session, and this repository does "
-            "not define an API-key route for the claude engine."
+            "Claude is a native engine in this tree. This repository does not "
+            "define an API-key route for it."
         ),
     ),
 }
@@ -205,12 +261,13 @@ def assess_explicit_route(
             f"Explicit {engine} API route. It requires observed {harness.api_auth} "
             f"auth. {harness.note}",
         )
-    if billing_policy_loaded and not harness.billing_observes_auth:
-        return _blocked(
-            engine, model, billing_route, provider,
-            f"Billing admission can observe Codex auth only. {harness.note} "
-            + OPENROUTER_NOT_SELECTED,
-        )
+    if billing_policy_loaded and billing_route in {None, "subscription"}:
+        probe = subscription_probe(engine)
+        if not probe.supported:
+            return _blocked(
+                engine, model, billing_route, provider,
+                probe.reason + " " + OPENROUTER_NOT_SELECTED,
+            )
     route = "subscription" if billing_route in {None, "subscription"} else billing_route
     if route != "subscription":
         return _blocked(

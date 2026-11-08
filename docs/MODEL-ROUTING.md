@@ -22,8 +22,8 @@ through the native subscription harness that actually supports the provider
 (`billing_route: "subscription"`, `service_tier: "standard"`):
 
 - **Codex host, OpenAI models:** `engine: "codex"`. Subscription auth is ChatGPT login (`forced_login_method="chatgpt"`, account type `chatgpt`). That is separate from an OpenAI API key and from OpenAI API credit balance. An API task sets `billing_route: "api"` and needs observed `api_key` auth.
-- **Grok host, xAI models:** `engine: "grok"` after `grok login` on a SuperGrok or X Premium Plus plan. This OAuth session does not authenticate OpenAI, Gemini, or OpenRouter. Ringer's billing probe does not observe it; with a billing policy loaded the task stops instead of moving to another harness.
-- **Gemini / Antigravity host, Google models:** `engine: "gemini"` via `engines/gemini_worker.py`, which execs the Antigravity CLI `agy` and removes `GEMINI_API_KEY` and `GOOGLE_API_KEY`. The `gemini` binary is not this harness. Grok and Codex logins do not authenticate it.
+- **Grok host, xAI models:** `engine: "grok"` after `grok login` on a SuperGrok or X Premium Plus plan. That OAuth session does not authenticate OpenAI, Gemini, or OpenRouter. With a billing policy loaded, the task stops: the published CLI reference has no headless status that separates that login from an `XAI_API_KEY` session, and Ringer does not read `~/.grok/auth.json` or treat `grok models` exit 0 as subscription evidence.
+- **Gemini / Antigravity host, Google models:** `engine: "gemini"` via `engines/gemini_worker.py`, which execs `agy` and removes `GEMINI_API_KEY` and `GOOGLE_API_KEY`. The `gemini` binary is not this harness. With a billing policy loaded, the task stops: documented sign-in is the OS keyring or an interactive browser flow, and there is no headless auth-status command. The keyring is not read.
 - **Claude Code host, Anthropic models:** `engine: "claude"`.
 - **Hermes host:** use the subscription engine for the provider in play (`codex`, `grok`, `gemini`, or `claude`).
 

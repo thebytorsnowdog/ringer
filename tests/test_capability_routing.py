@@ -27,6 +27,7 @@ from ringer_capabilities import (
     choose_unspecified_route,
     inventory_engines,
     missing_runtime_dependencies,
+    subscription_probe,
 )
 from ringer_costs import billing_preflight
 from ringer_reliability import select_openrouter_fallback_model
@@ -224,6 +225,239 @@ class CapabilityMatrixTests(unittest.TestCase):
             model = select_openrouter_fallback_model(Task(), state_dir=state)
         self.assertTrue(model.startswith("openrouter/"))
         self.assertNotIn("select_openrouter_fallback_model", (ROOT / "ringer.py").read_text(encoding="utf-8"))
+
+    def test_origin_harness_does_not_select_another_providers_engine(self) -> None:
+        decision = choose_unspecified_route(
+            originating="codex",
+            provider="google",
+            available={"codex", "gemini", "opencode"},
+            openrouter_consent=False,
+            billing_route="subscription",
+        )
+        self.assertEqual("allowed", decision.status)
+        self.assertEqual("gemini", decision.engine)
+        self.assertFalse(decision.spends_openrouter)
+        blocked = choose_unspecified_route(
+            originating="codex",
+            provider="google",
+            available={"codex", "opencode"},
+            openrouter_consent=True,
+            billing_route="subscription",
+        )
+        self.assertEqual("blocked", blocked.status)
+        self.assertFalse(blocked.spends_openrouter)
+
+    def test_subscription_probes_do_not_infer_billing_from_names_or_secrets(self) -> None:
+        secret = "xai-test-secret-not-a-subscription"
+        with patch.dict(os.environ, {"XAI_API_KEY": secret, "GEMINI_API_KEY": secret, "GOOGLE_API_KEY": secret}):
+            grok = subscription_probe("grok")
+            gemini = subscription_probe("gemini")
+            claude = subscription_probe("claude")
+            codex = subscription_probe("codex")
+        self.assertTrue(codex.supported)
+        self.assertIn("chatgpt", codex.reason)
+        self.assertIn("api_key", codex.reason)
+        for probe in (grok, gemini, claude):
+            self.assertFalse(probe.supported)
+            self.assertNotIn(secret, probe.reason)
+        self.assertIn("XAI_API_KEY", grok.reason)
+        self.assertIn("auth.json", grok.reason)
+        self.assertIn("keyring", gemini.reason)
+        self.assertIn("GEMINI_API_KEY", gemini.reason)
+        loaded = assess_explicit_route(
+            engine="grok", model="grok-4.7", billing_route="subscription", billing_policy_loaded=True,
+        )
+        self.assertEqual("blocked", loaded.status)
+        self.assertIn("not subscription evidence", loaded.reason)
+        self.assertFalse(loaded.spends_openrouter)
+
+
+class DispatchFailureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.marker = self.root / "spawned"
+        gate = patch.object(ringer, "validate_manifest_model_assessment", return_value={})
+        gate.start()
+        self.addCleanup(gate.stop)
+
+    def _stub(self, name: str, body: str) -> Path:
+        path = self.root / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def _policy(self) -> Path:
+        path = self.root / "policy.json"
+        path.write_text(json.dumps({
+            "monthly_api_cap_gbp": "5",
+            "run_api_cap_gbp": "5",
+            "automatic_paid_fallback": True,
+            "subscription_auth_modes": ["chatgpt"],
+        }), encoding="utf-8")
+        return path
+
+    def _config(self, engines, policy: Path | None = None) -> ringer.AppConfig:
+        return ringer.AppConfig(
+            path=None, identity_default=None, state_dir=self.root / "state",
+            dashboard_port_base=18787, hud_port=18788, hud_app_path=None,
+            allow_full_access=False,
+            eval=ringer.EvalConfig(backend="jsonl", jsonl_path=self.root / "attempts.jsonl"),
+            engines=engines,
+            artifact=ringer.ArtifactConfig(
+                enabled=False, out_template="", report_template="", index_out=self.root / "index",
+            ),
+            billing_policy_path=policy,
+        )
+
+    def _run(self, manifest, config) -> ringer.RingerRunner:
+        runner = ringer.RingerRunner(manifest, config, "test", dashboard_enabled=False)
+        asyncio.run(runner.run())
+        return runner
+
+    def test_policy_loaded_grok_does_not_spawn_or_reserve_or_leak_api_key(self) -> None:
+        secret = "xai-test-secret-not-a-subscription"
+        stub = self._stub("grok", f"#!/bin/sh\necho spawned >> {self.marker}\nexit 0\n")
+        other = self._stub("openrouter-bin", f"#!/bin/sh\necho paid >> {self.marker}\nexit 0\n")
+        manifest = ringer.Manifest.from_obj({
+            "run_name": "grok-unobserved",
+            "workdir": str(self.root / "work"),
+            "tasks": [{
+                "key": "one", "spec": "Write out.txt", "engine": "grok", "model": "grok-4.7",
+                "billing_route": "subscription", "check": "test -s out.txt", "expect_files": ["out.txt"],
+            }],
+        })
+        config = self._config({
+            "grok": ringer.EngineConfig(
+                name="grok", bin=str(stub), args_template=("-p", "{spec}"),
+                full_access_args=(), sandbox_args=(), token_regex=None, model_default="grok-4.7",
+            ),
+            "openrouter": ringer.EngineConfig(
+                name="openrouter", bin=str(other), args_template=("{spec}",),
+                full_access_args=(), sandbox_args=(), token_regex=None,
+                model_default="openrouter/x-ai/grok-4.7",
+            ),
+        }, self._policy())
+        with patch.dict(os.environ, {"XAI_API_KEY": secret}):
+            runner = self._run(manifest, config)
+        runtime = runner.runtimes[0]
+        self.assertEqual(0, runtime.attempts)
+        self.assertEqual("blocked", runtime.status)
+        self.assertEqual("grok", runtime.task.engine)
+        self.assertIn("XAI_API_KEY", runtime.setup_error or "")
+        self.assertNotIn(secret, runtime.setup_error or "")
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
+
+    def test_provider_error_does_not_switch_to_the_configured_openrouter_bin(self) -> None:
+        codex = self._stub("codex", "#!/bin/sh\necho 'error: connection refused' >&2\nexit 1\n")
+        paid = self._stub("paid", f"#!/bin/sh\necho paid >> {self.marker}\nprintf 'ok\\n' > out.txt\n")
+        manifest = ringer.Manifest.from_obj({
+            "run_name": "provider-error",
+            "workdir": str(self.root / "work"),
+            "tasks": [{
+                "key": "one", "spec": "Write out.txt", "engine": "codex", "model": "gpt-5.6-terra",
+                "billing_route": "subscription", "max_attempts": 1,
+                "check": "grep -q ok out.txt", "expect_files": ["out.txt"],
+            }],
+        })
+        config = self._config({
+            "codex": ringer.EngineConfig(
+                name="codex", bin=str(codex), args_template=("{spec}",),
+                full_access_args=(), sandbox_args=(), token_regex=None, model_default="gpt-5.6-terra",
+            ),
+            "opencode": ringer.EngineConfig(
+                name="opencode", bin=str(paid),
+                args_template=("run", "-m", "{model}", "{spec}"),
+                full_access_args=(), sandbox_args=(), token_regex=None,
+            ),
+        })
+        runner = self._run(manifest, config)
+        runtime = runner.runtimes[0]
+        self.assertEqual("codex", runtime.task.engine)
+        self.assertNotEqual("pass", runtime.status)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
+
+    def test_quota_with_budget_cap_does_not_reserve_openrouter(self) -> None:
+        usage = self.root / "usage"
+        usage.mkdir()
+        (usage / "codex.json").write_text(json.dumps({
+            "limits": [{"label": "Weekly", "percent": 1.0, "resetsAt": "2099-01-01T00:00:00Z"}],
+        }), encoding="utf-8")
+        codex = self._stub("codex", f"#!/bin/sh\necho ran >> {self.marker}\n")
+        paid = self._stub("paid", f"#!/bin/sh\necho paid >> {self.marker}\nprintf 'ok\\n' > out.txt\n")
+        manifest = ringer.Manifest.from_obj({
+            "run_name": "quota-no-switch",
+            "workdir": str(self.root / "work"),
+            "tasks": [{
+                "key": "one", "spec": "Write out.txt", "engine": "codex", "model": "gpt-5.6-terra",
+                "billing_route": "subscription", "task_spend_allowance_gbp": 0.25,
+                "check": "grep -q ok out.txt", "expect_files": ["out.txt"],
+            }],
+        })
+        config = self._config({
+            "codex": ringer.EngineConfig(
+                name="codex", bin=str(codex), args_template=("{spec}",),
+                full_access_args=(), sandbox_args=(), token_regex=None,
+            ),
+            "openrouter": ringer.EngineConfig(
+                name="openrouter", bin=str(paid), args_template=("{spec}",),
+                full_access_args=(), sandbox_args=(), token_regex=None,
+                model_default="openrouter/z-ai/glm-5.3-flash",
+            ),
+        }, self._policy())
+        with patch.dict(os.environ, {"RINGER_USAGE_DIR": str(usage)}):
+            runner = self._run(manifest, config)
+        runtime = runner.runtimes[0]
+        self.assertEqual(0, runtime.attempts)
+        self.assertEqual("quota", runtime.failure_class)
+        self.assertEqual("codex", runtime.task.engine)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
+
+    def test_explicit_openrouter_consent_is_the_api_route_not_the_budget_cap(self) -> None:
+        binary = self._stub("opencode", "#!/bin/sh\nprintf 'ok\\n' > out.txt\n")
+        engines = {
+            "opencode": ringer.EngineConfig(
+                name="opencode", bin=str(binary),
+                args_template=("run", "-m", "{model}", "{spec}"),
+                full_access_args=(), sandbox_args=(), token_regex=None,
+            ),
+        }
+        refused = ringer.Manifest.from_obj({
+            "run_name": "cap-is-not-consent",
+            "workdir": str(self.root / "work-refused"),
+            "tasks": [{
+                "key": "one", "spec": "Write out.txt", "engine": "opencode",
+                "model": "openrouter/z-ai/glm-5.3-flash", "billing_route": "subscription",
+                "task_spend_allowance_gbp": 0.25, "check": "grep -q ok out.txt",
+                "expect_files": ["out.txt"],
+            }],
+        })
+        runner = self._run(refused, self._config(engines, self._policy()))
+        self.assertEqual(0, runner.runtimes[0].attempts)
+        self.assertEqual("opencode", runner.runtimes[0].task.engine)
+        self.assertIn("billing_route api", runner.runtimes[0].setup_error or "")
+        self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
+        self.assertFalse((self.root / "work-refused" / "one" / "out.txt").exists())
+
+        allowed = ringer.Manifest.from_obj({
+            "run_name": "explicit-consent",
+            "workdir": str(self.root / "work-allowed"),
+            "tasks": [{
+                "key": "one", "spec": "Write out.txt with ok.", "engine": "opencode",
+                "model": "openrouter/z-ai/glm-5.3-flash", "billing_route": "api",
+                "task_spend_allowance_gbp": 0.25, "check": "grep -q ok out.txt",
+                "expect_files": ["out.txt"],
+            }],
+        })
+        runner = self._run(allowed, self._config(engines, self._policy()))
+        self.assertEqual("pass", runner.runtimes[0].status)
+        self.assertEqual("ADMITTED", runner.runtimes[0].billing.get("billing_status"))
+        ledger = json.loads((self.root / "state" / "cost-reservations.json").read_text(encoding="utf-8"))
+        self.assertTrue(ledger["reservations"])
 
 
 class WrapperPreflightTests(unittest.TestCase):

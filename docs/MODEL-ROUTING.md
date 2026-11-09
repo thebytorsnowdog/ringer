@@ -16,18 +16,21 @@ before a new execution; historical data reads are unaffected.
 ## Automatic use and capability-aware subscription routing
 
 Use Ringer whenever the workflow benefits from it, without asking permission
-or requiring model-selection confirmation. The model/harness starting the
-request coordinates specs, checks, routing and review, and routes a new task
-through the native subscription harness that actually supports the provider
-(`billing_route: "subscription"`, `service_tier: "standard"`):
+or requiring model-selection confirmation. The model or harness starting the
+request coordinates specs, checks, routing and review. Subscription tasks use
+`billing_route` `subscription` and `service_tier` `standard`.
 
-- **Codex host, OpenAI models:** `engine: "codex"`. Subscription auth is ChatGPT login (`forced_login_method="chatgpt"`, account type `chatgpt`). That is separate from an OpenAI API key and from OpenAI API credit balance. An API task sets `billing_route: "api"` and needs observed `api_key` auth.
-- **Grok host, xAI models:** `engine: "grok"` after `grok login` on a SuperGrok or X Premium Plus plan. That OAuth session does not authenticate OpenAI, Gemini, or OpenRouter. With a billing policy loaded, the task stops before a worker starts: the published CLI reference has no headless status that separates that login from an `XAI_API_KEY` session. A cleared `XAI_API_KEY` or the engine name is not subscription evidence. Ringer does not read `~/.grok/auth.json`. Without a billing policy, this gate is not applied.
-- **Gemini / Antigravity host, Google models:** `engine: "gemini"` via `engines/gemini_worker.py`, which execs `agy` and removes `GEMINI_API_KEY` and `GOOGLE_API_KEY`. The `gemini` binary is not this harness. With a billing policy loaded, the task stops before a worker starts: documented sign-in is the OS keyring or an interactive browser flow, and there is no headless auth-status command. The keyring is not read. Without a billing policy, this gate is not applied.
-- **Claude Code host, Anthropic models:** `engine: "claude"`.
-- **Hermes host:** use the subscription engine for the provider in play (`codex`, `grok`, `gemini`, or `claude`).
+The task names the engine. `assess_explicit_route` keeps that engine or blocks it. The runner does not call `choose_unspecified_route`, and it does not move a stopped task onto another engine.
 
-OpenCode is not required for those routes. A Codex run does not look for `opencode`.
+Subscription work names a native engine and `billing_route` `subscription`. Codex is the native engine with a subscription probe. Subscription auth is ChatGPT login (`forced_login_method="chatgpt"`, account type `chatgpt`). That login is separate from an OpenAI API key and from OpenAI API credit balance. An API task sets `billing_route` `api` and needs observed `api_key` auth, plus a billing policy file.
+
+- **Codex, OpenAI models:** `engine` `codex`. When a billing policy is loaded, this is the native subscription route admission can start.
+- **Grok, xAI models:** `engine` `grok` after `grok login` on a SuperGrok or X Premium Plus plan. That OAuth session does not authenticate OpenAI, Gemini, or OpenRouter. With a billing policy loaded, the task stops before a worker starts. The published CLI reference has no headless status that separates that login from an `XAI_API_KEY` session. A cleared `XAI_API_KEY` or the engine name is not subscription evidence. Ringer does not read `~/.grok/auth.json`. Without a billing policy, this probe gate is off, and a Grok task with subscription billing can still start. It does not reserve paid spend. A Grok `billing_route` of `api` is refused with or without a policy file, because this repository defines no API-key route for Grok.
+- **Gemini / Antigravity, Google models:** `engine` `gemini` via `engines/gemini_worker.py`, which execs `agy` and removes `GEMINI_API_KEY` and `GOOGLE_API_KEY`. The `gemini` binary is not this harness. With a billing policy loaded, the task stops before a worker starts. Documented sign-in is the OS keyring or an interactive browser flow, and there is no headless auth-status command. The keyring is not read. Without a billing policy, this probe gate is off, and a Gemini task with subscription billing can still start. It does not reserve paid spend. A Gemini `billing_route` of `api` is refused with or without a policy file, because this repository defines no API-key route for Gemini.
+- **Claude is unsupported.** This fork has no Claude subscription. Do not set `engine` `claude`. The name is still in `ringer_capabilities.HARNESSES`. A loaded billing policy blocks it, because Claude subscription admission is not implemented. Without a policy file the probe gate is off, so a named `claude` task can still reach preflight. That path is not a supported route.
+- **Hermes is retired.** It is not an engine. Notes that mention it record older runs.
+
+A Codex run does not look for `opencode`. Coordination and consequential classes in `docs/DELEGATION-MATRIX.md` stay on a subscription engine when the coordinator writes the task. `admit()` does not pass `task_class`, so the runner treats an explicit OpenRouter task as `bounded-detail`.
 
 ## Coordinator rule discovery
 
@@ -37,9 +40,22 @@ Grok rule discovery cannot be claimed from that projection. The inventory found 
 
 Antigravity rule discovery cannot be claimed from that projection. No Antigravity or Gemini skill directory was written. `engines/gemini_worker.py` execs `agy` and removes `GEMINI_API_KEY` and `GOOGLE_API_KEY`. The documented sign-in is the OS keyring or an interactive browser flow, and the command list has no headless auth-status. The keyring is not read. Auth state is unknown. That is not a claim that the user is logged out, and it is not a claim that `agy` loaded the Ringer skill.
 
-`~/.claude` was not present for a skill projection. `pstack-ringer-defaults` was left in place. `~/AGENTS.md` and `~/.codex/AGENTS.md` were already telling harnesses to route through Ringer, and those files were not rewritten.
+`~/.claude` was not present for a skill projection. `pstack-ringer-defaults` was left in place. `~/AGENTS.md` and `~/.codex/AGENTS.md` were already telling harnesses to route through Ringer, and those files were not rewritten. Claude remains unsupported.
 
-**No automatic OpenRouter fallback.** A usage cap, missing CLI, auth failure, or provider error stops that route. Ringer does not rewrite the task onto `openrouter` or `opencode`, does not reserve OpenRouter spend, and does not treat `automatic_paid_fallback` or a budget cap as approval. OpenRouter runs only when the task names `engine: "opencode"` or `engine: "openrouter"`, a model starting with `openrouter/`, `billing_route: "api"`, and a spend allowance. `engines/opencode-sandboxed.sh` is a wrapper: preflight fails before spend when `opencode` itself is absent, even if the wrapper is executable. Tell the user the route stopped. Do not install a CLI for them.
+## Paid dispatch and fallback
+
+**No automatic OpenRouter fallback.** A usage cap, missing binary, auth failure, or provider error stops the named route. Ringer does not rewrite the task onto `openrouter` or `opencode`, does not reserve OpenRouter spend for that failure, and does not treat `automatic_paid_fallback` or a budget cap as approval to switch engines. `select_openrouter_fallback_model` is not called by the runner.
+
+Paid OpenRouter dispatch requires every item below. Miss one and the attempt does not start.
+
+- `engine` is `openrouter`. Naming `opencode` can pass the route check and is then refused at admission. `prepare_openrouter_dispatch` returns a refusal for every engine other than `openrouter`.
+- `billing_route` is `api`.
+- The model is on the approved shortlist: `openrouter/z-ai/glm-5.3-flash` or `openrouter/deepseek/deepseek-v4.1-flash`. The unprefixed aliases of those two ids are accepted. Any other slug is refused, including a `:nitro` suffix.
+- A billing policy file is loaded through `[billing].policy_path`. No policy file means no paid dispatch. The same refusal covers `billing_route` `api` on any engine, and engines `opencode` and `openrouter`, before a worker starts.
+- The policy sets `task_api_cap_gbp` and `paid_retries` to false. Attempt 2 is refused. There is no automatic paid retry.
+- The reservation is the worst case of the named token bounds, at most 200,000 input tokens and 64,000 output tokens, priced from the stored catalogue and a USD to GBP rate dated within 14 days. That figure must fit the task allowance, the policy caps, and the 8 November 2026 approval caps: £10 in a month, £1 for one swarm run, and £0.25 for one task. A lower policy cap still binds. A higher policy cap does not raise the approval caps.
+
+The worker is `engines/openrouter_worker.py`: one chat completion, no tools, no redirect, and no retry. The worker does not execute the `claude` binary. Preflight still treats a bin named `openrouter_worker.py` as requiring that binary. That check is a defect. Do not install Claude to satisfy it. The runner does not call `select_bounded_worker`, so the task has to name the model. The coordinator keeps subscription engines for coordination and consequential work. The shortlist is for an explicit bounded OpenRouter task, not a silent substitute when a subscription route stops. Tell the user the route stopped. Do not install a CLI for them.
 
 Choices within existing authority are coordinator decisions. Ask only for
 genuinely missing authority. Preserve executable checks, sandbox confinement,
@@ -166,10 +182,10 @@ See [model evaluation](MODEL-EVALUATION.md). Automatic weekly catalog-only
 refresh uses zero inference: it does not run probes, authorise API spending or
 replace capability assessment before selection. Catalog compatibility does not
 prove best quality. If refresh or relevant evidence is unavailable, do not
-silently select a stale candidate. Use `engine: opencode` and an explicit
-current `model: openrouter/<exact-model-slug>` after review; no implicit default
-or model override hidden in engine arguments. Paid candidates still need
-existing API authority and unchanged caps.
+silently select a stale candidate. Paid dispatch uses `engine` `openrouter`
+and one shortlist id from `docs/DELEGATION-MATRIX.md`. There is no implicit
+default, and no model override hidden in engine arguments. Paid candidates
+still need a billing policy file and the approval caps.
 
 Exploration is optional when useful to the job within existing authority;
 there is no compulsory exploration slot or user model-selection confirmation.
@@ -182,27 +198,15 @@ review, and a worker cannot create its own approval receipt.
 
 ## Historical OpenRouter probation policy (17 September 2026)
 
-Use deterministic tools first. The current GPT-6 Codex model remains the
-coordinator/reviewer. These restrictions govern OpenRouter exploration and
-implementation; they do not activate a global route. Subscription priority
-supersedes the former OpenRouter-first preference. Retain these historical
-reliability restrictions unless fresh assessment and executed evidence justify
-a change within existing authority.
+This section records the restrictions written on 17 September 2026. It is not the live paid shortlist. The live shortlist is the 8 November 2026 approval in `docs/DELEGATION-MATRIX.md`: `openrouter/z-ai/glm-5.3-flash` and `openrouter/deepseek/deepseek-v4.1-flash`, on `engine` `openrouter`, inside £10 a month, £1 a swarm run, and £0.25 a task, with no paid retry. The September line that kept DeepSeek disabled does not apply to that flash id.
 
-- MiMo uses `engine: opencode` and exact model `openrouter/xiaomi/mimo-v2.5`
-  only for small isolated implementation with a strong executable check.
-  Allow one attempt, overriding the general retry guidance, and require an
-  explicit positive `task_spend_allowance_gbp` after paid API authority.
-- GLM uses exact model `openrouter/z-ai/glm-5.3-flash` only for cost-first,
-  non-urgent work with an early write checkpoint and a clear stop condition.
-- DeepSeek, exact model `openrouter/deepseek/deepseek-v4.1-flash`, stays
-  disabled until a fresh no-fallback provider smoke is consistently stable.
+On 17 September 2026 the recorded restrictions were:
 
-No automatic fallback or top-up. Route changes require fresh assessment.
-None of these models is globally promoted until there are 30 distinct real
-jobs in a task family, 75% first-try and 85% final-check pass rates, plus
-human review before global promotion. Existing API authority and budget
-limits still apply.
+- MiMo, exact model `openrouter/xiaomi/mimo-v2.5`, only for small isolated implementation, one attempt, and an explicit positive `task_spend_allowance_gbp`, through `engine` `opencode`.
+- GLM 5.3 Flash only for cost-first, non-urgent work.
+- DeepSeek v4.1 Flash disabled until a fresh no-fallback provider smoke.
+
+Those lines are not the dispatch rules now. Admission refuses `engine` `opencode`. MiMo is not on the shortlist. None of these models is globally promoted until there are 30 distinct real jobs in a task family, 75% first-try and 85% final-check pass rates, plus human review before global promotion.
 
 ## Evidence retained
 

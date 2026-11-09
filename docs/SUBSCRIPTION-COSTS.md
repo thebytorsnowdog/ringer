@@ -53,7 +53,9 @@ The published Pro 5x local-message estimates per five hours are Sol 50–500, Te
 
 ChatGPT authentication uses subscription access. API-key authentication is a different billing route; exhaustion does not automatically roll over to it. Credits are another paid category, distinct from API-key and OpenRouter billing. Existing explicit OpenRouter routes remain API routes.
 
-The example disables automatic paid fallback and sets the incremental monthly API cap to GBP 0. Enabling fallback alone never permits dispatch: an explicit API route, task allowance and available reservation are still required.
+The example disables automatic paid fallback and sets the incremental monthly API cap to GBP 0. Enabling fallback alone never permits dispatch: an explicit API route, task allowance and available reservation are still required. `automatic_paid_fallback` does not change the engine. No policy file means no paid dispatch.
+
+The live paid shortlist and the £10, £1, and £0.25 caps are in `docs/DELEGATION-MATRIX.md`. The example FX date of 2 September 2026 is older than the 14-day limit that paid admission enforces, so this example file would refuse a shortlist call until the rate is refreshed. The paid engine is `openrouter`. `opencode` is refused at admission.
 
 ## Policy boundary
 
@@ -86,18 +88,20 @@ These are source-dated comparisons. Provider-reported actual costs take preceden
 
 ## Runner integration and reservations
 
+`billing_preflight` is the reservation helper. The runner's OpenRouter path calls `prepare_openrouter_dispatch` first. That step refuses `opencode`, a second attempt, and a reserve above £0.25. The allowance in the sketch is inside that cap. The sketch is not itself a dispatch.
+
 ```python
 from pathlib import Path
 from ringer_costs import SpendLedger, billing_preflight
 
 state_dir = Path("/path/to/run-state")
 decision = billing_preflight(
-    engine="opencode",
-    model="openrouter/z-ai/glm-5.2",
-    policy={"monthly_api_cap_gbp": "5", "run_api_cap_gbp": "2"},
+    engine="openrouter",
+    model="openrouter/z-ai/glm-5.3-flash",
+    policy={"monthly_api_cap_gbp": "5", "run_api_cap_gbp": "1"},
     observed_auth_mode="api_key",  # attested by the caller, never read here
     usage_snapshot=None,
-    task_spend_allowance_gbp="0.50",
+    task_spend_allowance_gbp="0.25",
     attempt_id="run-123/task-a/attempt-1",  # stable, globally unique
     run_id="run-123",
     month="2026-09",

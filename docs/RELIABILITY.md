@@ -30,7 +30,7 @@ Example, using an already configured engine:
   "max_parallel": 1,
   "tasks": [{
     "key": "review",
-    "engine": "opencode",
+    "engine": "codex",
     "task_type": "research",
     "spec": "Read the declared source and write report.md in the current task directory. Own only report.md. Explain the source evidence and uncertainty. The coordinator reviews the exported report and executed check before use.",
     "expect_files": ["report.md"],

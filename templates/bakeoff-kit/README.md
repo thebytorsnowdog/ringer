@@ -11,6 +11,8 @@ The validator checks completeness, output structure, allowed statuses, and
 literal source evidence. It does not decide whether each research verdict is
 intellectually correct. Do that in the blind review described in the guide.
 
+`swarm.model-only.example.json` names `engine` `openrouter` and the two approved shortlist models. A paid run also needs a billing policy file, `paid_retries` false, and a spend allowance inside £0.25. No policy file means no paid dispatch. `opencode` is refused. Claude is unsupported.
+
 ## Files
 
 ```text

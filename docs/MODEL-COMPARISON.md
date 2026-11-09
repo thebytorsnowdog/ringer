@@ -33,6 +33,8 @@ Supported selectors:
 - `opencode:openrouter/z-ai/glm-5.3-flash`
 - `opencode:openrouter/google/gemini-3.8-flash`
 
+The generator still emits `engine` `opencode` for those selectors, including models that are not on the paid shortlist. Admission refuses `opencode`. A paid run that should spend uses `engine` `openrouter` and a shortlist model from `docs/DELEGATION-MATRIX.md`, with a billing policy file. This page records what the generator writes. It does not make those cells dispatchable.
+
 Codex tasks use explicit `engine_args`: `-c forced_login_method="chatgpt"`, `-c service_tier="default"`, and `-c model_reasoning_effort="medium"`. This selects ChatGPT authentication, standard service and medium reasoning for parity. A generated selector is a declaration, not evidence that a model actually executed. Availability is determined during the later Ringer run.
 
 Generated tasks declare `billing_route: subscription` for Codex and `billing_route: api` for OpenCode. Generation never allocates a paid allowance automatically. To supply an authorised amount, add `--task-spend-allowance-gbp` with a finite positive GBP value. That value applies to each paid API cell; subscription cells receive no allowance. Without it, generation explains that paid cells still require a budget before dispatch. The normal billing admission and local policy caps still apply, including a zero local cap blocking paid dispatch even when an allowance is supplied.

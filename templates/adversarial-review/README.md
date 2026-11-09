@@ -20,7 +20,7 @@ Use this before merging a risky change, publishing a high-visibility artifact, o
 | `{{MODEL_A}}` | First model slug for the review engine. |
 | `{{MODEL_B}}` | Second model slug for the review engine. |
 | `{{MODEL_C}}` | Third model slug for the review engine. |
-| `{{REVIEW_ENGINE}}` | Engine name that supports the per-task `model` field, often `opencode`. |
+| `{{REVIEW_ENGINE}}` | Engine name that supports the per-task `model` field. Paid OpenRouter review uses `openrouter`. Admission refuses `opencode`. Claude is unsupported. |
 | `{{REVIEW_FOCUS}}` | Concrete review dimensions, such as auth boundaries, billing writes, data access, regressions, or claim accuracy. |
 | `{{REVIEW_SCOPE}}` | Human-readable scope name for the thing under review. |
 | `{{RUN_SLUG}}` | Stable run slug for this review. |

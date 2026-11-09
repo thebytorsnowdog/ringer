@@ -27,9 +27,9 @@ The machine-readable copies are `registry/openrouter-catalogue-2026-11-08.json` 
 
 | Class | Route | Choice |
 |---|---|---|
-| `bounded-detail` | native subscription, or a planned shortlist worker | Cheapest shortlist model whose conservative estimate fits £0.25. Cost arithmetic only. |
-| `coordination` | native subscription | Coordinator review does not move to OpenRouter. |
-| `consequential` | native subscription | Auth, money, deletion, and publication stay on the subscription route. |
+| `bounded-detail` | native subscription, or a planned shortlist worker | The coordinator names the shortlist model whose worst-case reserve fits £0.25. Cost arithmetic only. The runner does not call `select_bounded_worker`. |
+| `coordination` | native subscription | The coordinator keeps review on a subscription engine. |
+| `consequential` | native subscription | The coordinator keeps auth, money, deletion, and publication on a subscription engine. |
 
 Aliases `z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash` map to the `openrouter/` canonical ids. Anything else is refused.
 
@@ -55,6 +55,8 @@ Fetched 2026-11-08, latest observation 2026-11-06: EURGBP `0.83415`, EURUSD `1.1
 
 The approved ceilings bind even if a policy file names a higher cap: £10 in a month, £1 for every paid attempt in one swarm run, and £0.25 for one worker task. A lower cap in the policy file still binds. There is no automatic paid retry.
 
+`prepare_openrouter_dispatch` refuses a `task_class` other than `bounded-detail`. `ringer_billing.admit` does not pass `task_class`, so an explicit `openrouter` task is treated as `bounded-detail`. The class rows above are the coordinator's planning rule. The runner enforces the shortlist, the token bounds, the caps, `paid_retries: false`, and a loaded policy file.
+
 ## What this does not make operational
 
-Homebrew OpenCode 2.2.6 is installed on the Mac. The same release is installed on the ThinkPad and the mini through the existing mise shims, and those two trees were not updated or reconfigured. Auth state was not read. That is not a claim that a login is absent. Ringer does not read `auth.json` or the keyring. With a billing policy loaded, Grok, Antigravity, and Claude stop before a worker starts: a CLI name, a cleared API-key variable, or a saved login is not subscription evidence. Codex is the engine with a supported account probe. Codex subscription auth cannot stand in for the OpenRouter route. OpenCode stays undispatched. The shortlist can run only as that one bounded OpenRouter request.
+Homebrew OpenCode 2.2.6 is installed on the Mac. The same release is installed on the ThinkPad and the mini through the existing mise shims, and those two trees were not updated or reconfigured. Auth state was not read. That is not a claim that a login is absent. Ringer does not read `auth.json` or the keyring. With a billing policy loaded, Grok and Antigravity stop before a worker starts. A CLI name, a cleared API-key variable, or a saved login is not subscription evidence. Claude is unsupported on this fork. The engine name remains, and the same missing subscription probe blocks it when a policy is loaded. Hermes is retired and is not part of this matrix. Codex is the engine with a supported account probe. Codex subscription auth cannot stand in for the OpenRouter route. OpenCode stays undispatched. The shortlist can run only as that one bounded OpenRouter request.

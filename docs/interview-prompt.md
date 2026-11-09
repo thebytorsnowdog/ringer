@@ -1,10 +1,6 @@
 # The Ringer interview prompt
 
-Paste the prompt below into any chatbot you already use — ChatGPT, Claude,
-Gemini, whatever. It will interview you about the thing you're trying to get
-done, then hand you back a **brief**. Give that brief to the agent that runs
-Ringer for you (for example, paste it into Claude Code) and say
-*"run it through the ringer."*
+Paste the prompt below into a chatbot you already use, such as ChatGPT, Grok, or Gemini. It interviews you about the work, then hands back a **brief**. Give that brief to the agent that runs Ringer, for example Codex, and say *"run it through the ringer."* Claude is unsupported on this fork. Hermes is retired.
 
 You don't need to know what your tasks are, what order they go in, or what
 "done" looks like — the interview figures that out with you.

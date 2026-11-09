@@ -10,12 +10,9 @@
       "expect_files": [
         "result.json"
       ],
-      "engine": "opencode",
-      "model": "openrouter/<CURRENT-FRONTIER-MODEL-ID>",
-      "engine_args": [
-        "--variant",
-        "high"
-      ],
+      "engine": "openrouter",
+      "model": "openrouter/deepseek/deepseek-v4.1-flash",
+      "billing_route": "api",
       "task_type": "research",
       "timeout_s": 900,
       "verified": "the result includes each requested claim exactly once, uses the required fields and statuses, and any included citations match files in the allowed source directory"
@@ -27,12 +24,9 @@
       "expect_files": [
         "result.json"
       ],
-      "engine": "opencode",
-      "model": "openrouter/<CURRENT-QWEN-MODEL-ID>",
-      "engine_args": [
-        "--variant",
-        "high"
-      ],
+      "engine": "openrouter",
+      "model": "openrouter/z-ai/glm-5.3-flash",
+      "billing_route": "api",
       "task_type": "research",
       "timeout_s": 900,
       "verified": "the result includes each requested claim exactly once, uses the required fields and statuses, and any included citations match files in the allowed source directory"

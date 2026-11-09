@@ -102,19 +102,19 @@ missing CLI, and it does not authorise OpenRouter or any other paid route.
 
 Use Ringer whenever the workflow benefits from it, without asking permission
 or requiring model-selection confirmation. The model/harness starting the
-request coordinates specs, checks, routing and review. Choose the native
-subscription harness that supports the provider (`billing_route: "subscription"`,
-`service_tier: "standard"`):
+request coordinates specs, checks, routing and review. The task names the
+engine. Subscription tasks use `billing_route: "subscription"` and
+`service_tier: "standard"`.
 
-- **Codex host, OpenAI models:** `engine: "codex"`. Subscription auth is ChatGPT login, not an OpenAI API key and not OpenAI API credit balance. API use is a separate `billing_route: "api"` with observed `api_key` auth. Codex does not require OpenCode.
-- **Grok host, xAI models:** `engine: "grok"` via `grok login` OAuth. That session does not authenticate OpenAI, Gemini, or OpenRouter. A loaded billing policy stops this route until a supported subscription probe exists.
-- **Gemini / Antigravity host, Google models:** `engine: "gemini"` (`engines/gemini_worker.py` execs `agy` and strips Gemini API keys). The `gemini` CLI is not this harness. A loaded billing policy stops this route until a supported subscription probe exists. The keyring is not read.
-- **Claude Code host, Anthropic models:** `engine: "claude"` (`opus`, `sonnet`, `haiku`).
-- **Hermes host:** use the subscription engine for the provider in play.
+- **Codex host, OpenAI models:** `engine: "codex"`. Subscription auth is ChatGPT login, not an OpenAI API key and not OpenAI API credit balance. API use is a separate `billing_route: "api"` with observed `api_key` auth, and it needs a billing policy file. Codex does not require OpenCode. When a billing policy is loaded, Codex is the native engine whose subscription probe can admit a worker.
+- **Grok host, xAI models:** `engine: "grok"` via `grok login` OAuth. That session does not authenticate OpenAI, Gemini, or OpenRouter. A loaded billing policy stops this route before a worker starts. The subscription probe is not implemented.
+- **Gemini / Antigravity host, Google models:** `engine: "gemini"` (`engines/gemini_worker.py` execs `agy` and strips Gemini API keys). The `gemini` CLI is not this harness. A loaded billing policy stops this route before a worker starts. The subscription probe is not implemented. The keyring is not read.
+- **Claude is unsupported.** This fork has no Claude subscription. Do not set `engine: "claude"`. The name remains in the tree. A loaded billing policy blocks it because Claude subscription admission is not implemented.
+- **Hermes is retired.** It is not an engine. Older notes that mention it are historical.
 
-**No automatic OpenRouter fallback.** A usage cap, missing binary, auth failure, or provider error stops the route. Do not rewrite the task to `engine: "openrouter"` or `engine: "opencode"`. A cost-policy cap and `automatic_paid_fallback` are not approval to spend.
+**No automatic OpenRouter fallback.** A usage cap, missing binary, auth failure, or provider error stops the named route. Do not rewrite the task to `engine: "openrouter"` or `engine: "opencode"`. A cost-policy cap and `automatic_paid_fallback` are not approval to spend. The runner does not call `select_openrouter_fallback_model`.
 
-**Planned GLM/DeepSeek delegation** is a separate choice, recorded in `docs/DELEGATION-MATRIX.md`. Ian approved it at `2026-11-08T21:11:00Z` for the two flash shortlist models only, within £10 in a month, £1 for a swarm run, and £0.25 for one worker task, with no automatic paid retry. Coordinator review stays on the native subscription route. A stale USD-to-GBP rate still refuses dispatch. OpenCode 2.2.6 cannot hard-cap a call, so that paid route stays refused. Planned OpenRouter work uses one completion with `max_tokens` and a reserved worst case inside the explicit £0.25 task cap. A missing billing policy means no paid dispatch. Do not pass `--variant` or `--dir` to OpenCode.
+**Planned GLM/DeepSeek delegation** is a separate choice, recorded in `docs/DELEGATION-MATRIX.md`. Ian approved it at `2026-11-08T21:11:00Z` for `openrouter/z-ai/glm-5.3-flash` and `openrouter/deepseek/deepseek-v4.1-flash` only, within £10 in a month, £1 for a swarm run, and £0.25 for one worker task, with no automatic paid retry. Name `engine: "openrouter"`, `billing_route: "api"`, and the model on the task. The runner does not pick the cheaper shortlist model for you. Coordination and consequential work stay on a subscription engine in the plan. `admit()` does not pass `task_class`, so the runner treats an explicit OpenRouter task as bounded detail. A stale USD-to-GBP rate still refuses dispatch. OpenCode stays refused. The paid call is one completion from `engines/openrouter_worker.py`, with `max_tokens` and a reserved worst case inside the explicit £0.25 task cap. A missing billing policy means no paid dispatch.
 
 Choices within existing authority are coordinator decisions. Ask only for
 genuinely missing authority. Preserve executable checks, sandbox confinement,
@@ -306,13 +306,13 @@ API spending or replace pre-selection capability assessment. Catalog
 compatibility does not prove best quality. If refresh or relevant evidence is
 unavailable, do not silently select a stale candidate.
 
-For OpenRouter candidates use `"engine": "opencode"` and an explicit current
-`"model": "openrouter/<exact-model-slug>"`; never rely on a default, clone an
-engine block or splice `-m` into `engine_args` to change models. The native
-subscription harness remains the priority for suitable complicated work;
-OpenCode is the configured OpenRouter harness, not a universal worker mandate.
-Paid API candidates still require existing spending authority and unchanged
-caps; no free promotion or catalog refresh grants paid authority.
+For a paid OpenRouter task use `"engine": "openrouter"` and one shortlist
+model, `openrouter/z-ai/glm-5.3-flash` or
+`openrouter/deepseek/deepseek-v4.1-flash`. Never rely on a default, clone an
+engine block, or splice `-m` into `engine_args` to change models. Subscription
+work stays on the native engine named in the task. `opencode` is refused at
+admission. Paid API tasks still need a billing policy file and the approval
+caps. A catalogue refresh does not grant paid authority.
 
 **Exploration is optional.** Use `models --explore --task-type <type>` as a
 candidate list when an experiment benefits the job, fits existing authority
@@ -327,10 +327,10 @@ rounds and inspect per-family `routing_evidence`. A first 20-case microbenchmark
 is preliminary. Human review is still required before global promotion;
 a statistical label or passing check never creates that receipt.
 
-Engines are configured blocks selected per task via `engine`. Choose native
-subscription routes with explicit model/effort and standard service; unsupported
-or unauthenticated routes block rather than falling back. OpenRouter routes
-use the explicit assessed OpenCode slug and applicable reliability limits.
+Engines are configured blocks selected per task via `engine`. Choose a native
+subscription route with an explicit model, effort, and standard service.
+Unsupported or unauthenticated routes block. Paid OpenRouter routes use
+`engine` `openrouter` and a shortlist model. There is no silent paid fallback.
 
 - **Check the evidence before assigning models to tasks.** Run
   `./ringer.py models` — `first_try_pass_rate` is the routing signal;
@@ -363,10 +363,11 @@ Run-level `"worktrees": true` gives each task an isolated git worktree of
    git diff --cached > <path-outside-worktree>.patch
    ```
 
-   Never export with a plain `git add -A`. The Claude engine writes
-   `.runtime/` (CLAUDE_CONFIG_DIR and XDG dirs, including `.credentials.json`)
-   inside the worktree, and a plain sweep copied it into a patch on
-   16 Oct 2026. The `git reset` drops a `.runtime/` that a worker already
+   Never export with a plain `git add -A`. On 16 Oct 2026 an older Claude
+   engine wrote `.runtime/` (CLAUDE_CONFIG_DIR and XDG dirs, including
+   `.credentials.json`) inside the worktree, and a plain sweep copied it
+   into a patch. Claude is unsupported now. The `git reset` drops a
+   `.runtime/` that a worker already
    staged. This is the same staging the fix-swarm, test-hardening and
    migration-swarm checks use. You apply and commit on your branch after
    review.

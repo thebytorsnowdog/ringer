@@ -21,15 +21,17 @@ Every stage is read-only until the chosen build. Raw work history is never copie
 
 ## A concise end-to-end example
 
+The manifest commands below write `engine` `opencode`. Admission refuses that engine, so linting the file is not permission to spend. A paid task you actually dispatch uses `engine` `openrouter`, a shortlist model from `docs/DELEGATION-MATRIX.md`, and a billing policy file. Claude is unsupported. Hermes is retired.
+
 ```bash
 # From the Ringer repository root
 python3 ringer-discover.py init --write-root ./my-discovery
 
 python3 ringer-discover.py add-source \
   --write-root ./my-discovery \
-  --surface "Claude Code project history" \
+  --surface "local session history" \
   --kind ai-history \
-  --access-route ~/.claude/projects \
+  --access-route ~/.local/share/agent-history \
   --coverage-start 2026-01-01 \
   --coverage-end 2026-06-30
 
@@ -43,16 +45,16 @@ python3 ringer-discover.py approve-sources --write-root ./my-discovery --confirm
 
 python3 ringer-discover.py make-ingest-manifest \
   --write-root ./my-discovery \
-  --model openrouter/moonshotai/glm-5.2 \
+  --model openrouter/z-ai/glm-5.3-flash \
   --out ./my-discovery/ingest.json
 
 ./ringer.py lint ./my-discovery/ingest.json
-# Run the manifest, then merge each passing task dir
+# Admission refuses the generated engine. Merge a task dir only after a route that admission allows.
 python3 ringer-discover.py merge-ingest --write-root ./my-discovery --source 1 ./my-discovery/ingest-1-...
 
 python3 ringer-discover.py make-audit-manifest \
   --write-root ./my-discovery \
-  --model openrouter/moonshotai/glm-5.2 \
+  --model openrouter/z-ai/glm-5.3-flash \
   --out ./my-discovery/audit.json
 
 # After running the audit manifest
@@ -74,7 +76,7 @@ python3 ringer-discover.py choose-offer --write-root ./my-discovery --confirm 1
 
 python3 ringer-discover.py make-build-manifest \
   --write-root ./my-discovery \
-  --model openrouter/moonshotai/glm-5.2 \
+  --model openrouter/z-ai/glm-5.3-flash \
   --out ./my-discovery/build.json
 
 # After running the build manifest, merge the validated staged receipts

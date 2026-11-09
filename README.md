@@ -50,8 +50,8 @@ mkdir -p ~/.config/ringer && cp config.sample.toml ~/.config/ringer/config.toml 
 3. Teach your agent to route work through Ringer:
 
 ```bash
-# optional but recommended: teach your agent to route work through ringer
-./ringer.py install-agent
+# optional but recommended: teach Codex to route work through ringer
+./ringer.py install-agent --codex
 ```
 
 4. Assess and preview the demo before dispatch:
@@ -113,8 +113,8 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 | `check` | Shell command run after the worker exits; exit 0 = PASS |
 | `expect_files` | Files that must exist and be non-empty before the check runs |
 | `engine` | Which configured engine runs this task (default `codex`) |
-| `model` | Exact locally available model selected per task and recorded in the bound assessment; OpenRouter candidates use an explicit current `openrouter/<exact-model-slug>` through `opencode`, not an implicit default |
-| `billing_route` | Explicit `subscription` or `api`; subscription priority never grants paid API authority |
+| `model` | Exact model for this task, recorded in the bound assessment. A paid OpenRouter task names one shortlist id: `openrouter/z-ai/glm-5.3-flash` or `openrouter/deepseek/deepseek-v4.1-flash`. |
+| `billing_route` | Explicit `subscription` or `api`. A subscription label does not grant paid API authority. `api`, and engines `opencode` and `openrouter`, are refused when no billing policy file is loaded. |
 | `task_type` | Optional free-form string naming the kind of work this task is, so the model-performance log can slice pass rates by task shape rather than only by model. Suggested vocabulary: `code-feature`, `code-fix`, `code-review`, `test-hardening`, `docs`, `research`, `persona-review`, `copywriting`, `site-build`, `motion-design`, `image-gen`, `data-pipeline`, `format-conversion`, `probe`, `bakeoff`. Empty is allowed; the log just reports it under `(none)`. |
 | `timeout_s` | Per-task kill timer (default 900) |
 | `max_attempts` | How many times this task may run (default 2 — one try plus one retry with the check's failure output injected). Set `1` for a hard no-retry lane |
@@ -191,13 +191,7 @@ Each check runs in a fresh scratch dir (a detached worktree when the manifest us
 
 Between swarms, agents drift back to invisible inline work. Reminders decay, so enforcement ships with the product.
 
-For Claude Code, run:
-
-```bash
-./ringer.py install-agent
-```
-
-It installs the ringer skill — the orchestrator playbook — user-level for Claude Code, and registers two gentle hooks: a Bash hook that notices model-calling or harness commands running outside a live Ringer run, and an edit-loop hook that notices batch editing without a run. Each hook nudges ONCE per session, pointing the agent at the skill.
+Claude is unsupported on this fork. There is no Claude subscription. `./ringer.py install-agent` still copies `.claude/skills/ringer/SKILL.md` into `.claude` and registers Claude Code hooks. That command is the upstream installer. It is not a route you should use.
 
 For Codex, run:
 
@@ -207,21 +201,23 @@ For Codex, run:
 
 This installs the Codex-native ringer skill under `~/.agents/skills/ringer` (the path Codex discovers repository and user skills) and merges equivalent `PreToolUse` and `PostToolUse` nudges into `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json` if `CODEX_HOME` is set — skill discovery is not tied to `CODEX_HOME`, only hook/config storage is). Start a new Codex session, open `/hooks`, and approve the two Ringer hooks before they can run. Codex owns hook trust; the installer does not bypass that review.
 
-The playbook installed under `~/.agents/skills` (read by Codex and Antigravity) keeps whichever host is running in the coordinator seat, with Antigravity as the default; Codex subscription workers remain allowed but are not preferred. Use Ringer automatically when beneficial, without permission or model-selection confirmation; prioritise suitable authenticated subscription models through their native configured harness for complicated work. The hooks understand canonical Codex `Bash` and `apply_patch` payloads (with the command source in `tool_input.command`) as well as the `functions.exec` compatibility shape, while preserving the same once-per-session, non-blocking behavior.
+The playbook installed under `~/.agents/skills` is read by Codex, and Antigravity can be pointed at the same files. The host that is already running stays the coordinator. Use Ringer automatically when beneficial, without permission or model-selection confirmation. The task names the engine. When a billing policy is loaded, Codex is the native subscription engine admission can start. Grok and Antigravity stop before a worker starts, because their subscription probes are not implemented. Paid OpenRouter work is an explicit `openrouter` task on the shortlist in [the delegation matrix](docs/DELEGATION-MATRIX.md). The hooks understand canonical Codex `Bash` and `apply_patch` payloads (with the command source in `tool_input.command`) as well as the `functions.exec` compatibility shape. Each hook nudges once per session and does not block.
 
-The hooks never block anything. A user who says "just do it inline" is obeyed. Uninstall with `./ringer.py uninstall-agent` for Claude Code or `./ringer.py uninstall-agent --codex` for Codex. Add `--project` to either command to use the current project's `.claude` directory or the current project's `.agents` (skill) and `.codex` (hooks) directories instead of the user-level installation. Running `install-agent --codex --project` from inside the Ringer repository itself is safe: the canonical skill is left in place (the source is the target) and only the hooks are written.
+The hooks never block anything. A user who says "just do it inline" is obeyed. Uninstall Codex with `./ringer.py uninstall-agent --codex`. `./ringer.py uninstall-agent` without `--codex` removes the Claude Code install, which is unsupported here. Add `--project` to use the current project's `.agents` (skill) and `.codex` (hooks) directories instead of the user-level installation. Running `install-agent --codex --project` from inside the Ringer repository itself is safe: the canonical skill is left in place (the source is the target) and only the hooks are written.
 
 For CI and evals, `config.sample.toml` includes `[engines.mock]` so the enforcement stack can be tested without an API bill.
 
 ## Automatic routing and assessment
 
-Choices within existing authority are coordinator decisions; only genuinely
-missing authority warrants a question. Select exact locally available model
-and effort per task from configured harnesses and observed auth/quota. Record
-explicit subscription billing and standard service for subscription workers.
-Keep executable checks, sandbox, source integrity and artifact-bound review
-receipts. Never silently fall back to paid API or Fast, change credentials,
-top up or change budget caps.
+The task names the engine. The runner keeps that engine or blocks it. There is no silent paid fallback, and `automatic_paid_fallback` does not change the engine.
+
+Subscription work names a native engine and `billing_route` `subscription`. Codex is the native engine with a subscription probe, so a loaded billing policy can admit it. Grok and Antigravity remain in the tree. A loaded policy stops their subscription routes before a worker starts. Without a policy file that probe gate is off, and a subscription Grok or Antigravity task can still start. It does not reserve paid spend. An `api` billing route on either engine is refused, because this repository defines no API-key route for them.
+
+Claude is unsupported. Hermes is retired.
+
+Paid OpenRouter work names `engine` `openrouter`, `billing_route` `api`, and one shortlist model: `openrouter/z-ai/glm-5.3-flash` or `openrouter/deepseek/deepseek-v4.1-flash`. The approval caps are £10 in a month, £1 for a swarm run, and £0.25 for a task, with no paid retry. No policy file means no paid dispatch. `engine` `opencode` is refused at admission. The full rule is in [model routing](docs/MODEL-ROUTING.md) and [the delegation matrix](docs/DELEGATION-MATRIX.md).
+
+Choices within existing authority are coordinator decisions. Only genuinely missing authority warrants a question. Record the exact model and effort per task. Subscription workers use standard service. Keep executable checks, sandbox, source integrity and artifact-bound review receipts. Do not change credentials, top up, or change budget caps.
 
 Every real Ringer model job requires a bound model-fit assessment, including
 one-task jobs, `ask`, `demo`, reviews and repairs. Assessment is NOT user
@@ -238,7 +234,7 @@ cannot issue its own human review receipt, and coordinator review precedes use.
 
 ![Identical workers, each under its own light](docs/engines.png)
 
-Ringer ships with three worker lanes: **Codex CLI** is the built-in default, and `config.sample.toml` carries verified engine blocks for **Grok Build CLI** (works as-is once you `grok login`) and **OpenCode + OpenRouter** (one edit: point `bin` at the sandbox wrapper in your clone). Anything else with a headless CLI is a config block away:
+Codex CLI is the built-in default. `config.sample.toml` also carries a commented Grok block. Paid OpenRouter work is a separate `openrouter` engine you add, pointing `bin` at `engines/openrouter_worker.py`. The commented OpenCode block is not that route. Admission refuses `engine` `opencode`. Anything else with a headless CLI is a config block away:
 
 ```toml
 [engines.mymodel]
@@ -248,32 +244,15 @@ args_template = ["run", "{spec}", "--dir", "{taskdir}"]
 
 Per-task `"engine": "mymodel"` routes work to it — the invariants (stdin closed, process-group kill, executed verification, raw logs) apply to every engine identically.
 
-### The OpenRouter harness: OpenCode
+### Paid OpenRouter
 
-For OpenRouter candidates, OpenCode is the configured harness: use per-task `"engine": "opencode"` and an explicit currently available `"model": "openrouter/<exact-model-slug>"` after catalog and task-family evidence review. Subscription models use their native configured harness. Historical July 2026 setup note: the GLM `z-ai/glm-5.2` default was estimated at $0.74/M input and $2.33/M output, roughly 20–30x cheaper output than frontier models and around a penny per checked task. Those estimates describe an earlier cheap lane; they do not authorise an implicit model or prove current quality. Keep the selected model explicit in the task and matching assessment, rather than cloning engine blocks or hiding model switches in `engine_args`.
+Name `"engine": "openrouter"` and one shortlist model: `openrouter/z-ai/glm-5.3-flash` or `openrouter/deepseek/deepseek-v4.1-flash`. Set `billing_route` to `api`. Load a billing policy file. The approval caps are £10 in a month, £1 for a swarm run, and £0.25 for a task. `paid_retries` must be false. No policy file means no paid dispatch.
 
-OpenCode ships no OS sandbox, so the engine's `bin` points at an absolute path to `engines/opencode-sandboxed.sh` (ringer does not resolve engine bins relative to the repo): a macOS Seatbelt wrapper that leaves network and reads open but confines writes to the task dir, a per-run scratch dir (wired as the agent's `TMPDIR`/`XDG_CACHE_HOME`), and OpenCode's own state/config dirs. Its `--dangerously-skip-permissions` flag only silences OpenCode's interactive prompts; Seatbelt is the actual containment. Task paths reach the profile as `sandbox-exec -D` parameters rather than string interpolation, so a task dir with quotes or parens can't inject sandbox rules. `--no-sandbox` is wired as the engine's `full_access_args`, so ringer's `allow_full_access` gate still governs escapes. Non-macOS installs need their own sandbox (or full-access mode).
+The worker is `engines/openrouter_worker.py`. It sends one chat completion, with no tools and no retry. The key is read from `OPENROUTER_API_KEY` or `~/.config/ringer/openrouter.key`. The command must pass `--max-input-tokens` and `--max-tokens`. Ringer reserves the worst case of those bounds before the process starts. Preflight also looks for a `claude` binary when the bin file is named `openrouter_worker.py`. The worker does not run that binary. See [model routing](docs/MODEL-ROUTING.md).
 
-To let a worker edit a real repository, pass the repo checkout to the wrapper with its repeatable `--writable-root PATH` option — e.g. `engine_args = ["--writable-root", "{{REPO_PATH}}"]` (the `repo-feature` kit does exactly this). The wrapper strips every `--writable-root` pair before OpenCode sees the args and opens each root to the Seatbelt write allowlist (again via `-D` parameters, never interpolation). The Codex-only config string `-c sandbox_workspace_write.writable_roots=[...]` is NOT understood by this wrapper and is silently ignored — so a custom engine that wants OS-level write confinement must supply its own equivalent writable-root mechanism, or its workers hit EPERM on every repo edit.
+`engines/opencode-sandboxed.sh` is an older macOS Seatbelt wrapper. Admission refuses `engine` `opencode`, so that wrapper is not the paid route. `config.sample.toml` still comments an OpenCode block. Leaving that block commented matches current admission.
 
-Setting it up takes about five minutes:
-
-```bash
-# 1) Install the OpenCode CLI (pick one)
-curl -fsSL https://opencode.ai/install | bash
-# or: npm install -g opencode-ai
-# or: brew install anomalyco/tap/opencode
-
-# 2) Connect OpenRouter — create a key at https://openrouter.ai/settings/keys
-opencode auth login   # select OpenRouter, paste the key
-
-# 3) In ~/.config/ringer/config.toml, uncomment [engines.opencode] and set
-#    bin to the ABSOLUTE path of engines/opencode-sandboxed.sh in this clone.
-#    (Linux/WSL: the wrapper is macOS-only — set bin to the opencode binary
-#    itself; there is no OS write-confinement then, so keep manifests scoped.)
-```
-
-Choose a supported reasoning variant explicitly in `engine_args`, and verify that the bound assessment matches the resolved command. Paid OpenRouter routes require existing API authority and budget admission; these calls do not use Codex subscription quota. A catalog listing, free promotion or compatible command does not establish quality or grant paid authority.
+A July 2026 note estimated GLM `z-ai/glm-5.2` at $0.74/M input and $2.33/M output. That model is not on the shortlist. The estimate does not authorise a dispatch.
 
 ### The plan lane: Grok Build CLI
 
@@ -290,11 +269,11 @@ grok login
 # 3) In ~/.config/ringer/config.toml, uncomment [engines.grok]
 ```
 
-Route with per-task `"engine": "grok"` and pick the model with `"model": "grok-build"` or `"model": "grok-composer-2.5-fast"` (the shipped default — the speed pick). Grok brings its own OS sandbox on macOS (profile `workspace`: read everywhere, writes confined to the task dir, temp, and `~/.grok`), and its JSON output exposes no token counts — plan-billed workers report cost as included in plan.
+Route with per-task `"engine": "grok"` and pick the model with `"model": "grok-build"` or `"model": "grok-composer-2.5-fast"` (the shipped sample default, the speed pick). A loaded billing policy stops this route before a worker starts, because the subscription probe is not implemented. Without a policy file the probe gate is off. Grok brings its own OS sandbox on macOS (profile `workspace`: read everywhere, writes confined to the task dir, temp, and `~/.grok`), and its JSON output exposes no token counts. Plan-billed workers report cost as included in plan. That JSON does not prove the call was covered by the subscription.
 
 `args_template` is an argv array, not a shell string. Ringer replaces `{taskdir}`, `{spec}`, and `{model}` inside each argv element. `{access_args}`, `{sandbox_args}`, `{full_access_args}`, `{model_args}` (becomes `-m <resolved model>` when the task or engine names one), and `{engine_args}` (the task's per-task `engine_args`) expand to multiple argv elements only when they appear as their own array item.
 
-Watch for variadic CLI flags. If an engine has a flag that consumes all following values, put `{spec}` before that flag. For Claude-style CLIs, prefer:
+Watch for variadic CLI flags. If an engine has a flag that consumes all following values, put `{spec}` before that flag. Prefer:
 
 ```toml
 args_template = ["-p", "{spec}", "--allowedTools", "Bash"]
@@ -483,8 +462,8 @@ Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the phi
 
 ---
 
-Built by [Nate Jones](https://natejones.com) and maintained by [LEJ](https://limitededitionjonathan.com) — a Claude orchestrator wrote the specs and reviewed the diffs, Codex swarms wrote the implementation, and this repo's own eval table caught its first three bugs. The tool is its own proof of concept.
+Built by [Nate Jones](https://natejones.com) and maintained by [LEJ](https://limitededitionjonathan.com). In the original build a Claude orchestrator wrote the specs and reviewed the diffs, Codex swarms wrote the implementation, and this repo's own eval table caught its first three bugs. Claude is unsupported on this fork. The tool is its own proof of concept.
 
 ## Fork additions
 
-This is [thebytorsnowdog/ringer](https://github.com/thebytorsnowdog/ringer), a fork of [NateBJones-Projects/ringer](https://github.com/NateBJones-Projects/ringer). Its `main` mirrors upstream; its `ian` branch is upstream plus Codex as a coordinating host, `--writable-root` for sandboxed OpenCode workers, a GLM 5.3 Flash registry entry, cost, billing, reliability and model-routing evidence (with a required pre-dispatch model-fit gate), the `ringer-discover` companion and a mission-fit gate for agents. See [docs/fork/README.md](docs/fork/README.md).
+This is [thebytorsnowdog/ringer](https://github.com/thebytorsnowdog/ringer), a fork of [NateBJones-Projects/ringer](https://github.com/NateBJones-Projects/ringer). Its `main` mirrors upstream. Its `ian` branch adds Codex as a worker engine with a subscription probe, the GLM and DeepSeek OpenRouter shortlist, cost, billing, reliability and model-routing evidence, the model-fit gate, `ringer-discover`, and the mission-fit gate. Claude is unsupported. Hermes is retired. Paid OpenRouter dispatch uses `engine` `openrouter`. The older OpenCode wrapper is refused at admission. See [docs/fork/README.md](docs/fork/README.md).

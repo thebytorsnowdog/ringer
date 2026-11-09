@@ -438,7 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mim = sub.add_parser("make-ingest-manifest", help="Generate Stage 1 Ringer manifest")
     _write_root_option(p_mim)
-    p_mim.add_argument("--model", required=True, help="OpenRouter model slug for opencode")
+    p_mim.add_argument("--model", required=True, help="Shortlist or subscription model. The delegation table chooses the engine.")
     p_mim.add_argument("--out", required=True)
     p_mim.add_argument("--min-rows", type=int, default=10)
 

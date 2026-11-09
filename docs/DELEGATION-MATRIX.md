@@ -27,9 +27,11 @@ The machine-readable copies are `registry/openrouter-catalogue-2026-11-08.json` 
 
 | Class | Route | Choice |
 |---|---|---|
-| `bounded-detail` | native subscription, or a planned shortlist worker | Cheapest shortlist model whose conservative estimate fits £0.25. Cost arithmetic only. |
+| `bounded-detail` | native subscription, or a planned shortlist worker | Cheapest shortlist model whose conservative estimate fits £0.25. Cost arithmetic only. An explicit task may name that model or a cheaper or equal shortlist model. |
 | `coordination` | native subscription | Coordinator review does not move to OpenRouter. |
 | `consequential` | native subscription | Auth, money, deletion, and publication stay on the subscription route. |
+
+`route_from_table()` reads this file. `admit()` passes the task's `task_class` into the paid check, so a coordination or consequential task cannot reserve OpenRouter spend. A missing class does not default to `bounded-detail`. Claude is refused before either choice. OpenCode is not selected.
 
 Aliases `z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash` map to the `openrouter/` canonical ids. Anything else is refused.
 
@@ -57,4 +59,4 @@ The approved ceilings bind even if a policy file names a higher cap: £10 in a m
 
 ## What this does not make operational
 
-Homebrew OpenCode 2.2.6 is installed on the Mac. The same release is installed on the ThinkPad and the mini through the existing mise shims, and those two trees were not updated or reconfigured. Auth state was not read. That is not a claim that a login is absent. Ringer does not read `auth.json` or the keyring. With a billing policy loaded, Grok, Antigravity, and Claude stop before a worker starts: a CLI name, a cleared API-key variable, or a saved login is not subscription evidence. Codex is the engine with a supported account probe. Codex subscription auth cannot stand in for the OpenRouter route. OpenCode stays undispatched. The shortlist can run only as that one bounded OpenRouter request.
+Homebrew OpenCode 2.2.6 is installed on the Mac. The same release is installed on the ThinkPad and the mini through the existing mise shims, and those two trees were not updated or reconfigured. Auth state was not read. That is not a claim that a login is absent. Ringer does not read `auth.json` or the keyring. With a billing policy loaded, Grok and Antigravity stop before a worker starts: a CLI name, a cleared API-key variable, or a saved login is not subscription evidence. Claude stops whether or not a policy file is loaded, because there is no Claude subscription. Grok and Antigravity without a policy file are unchanged. Codex is the engine with a supported account probe. Codex subscription auth cannot stand in for the OpenRouter route. OpenCode stays undispatched. The shortlist can run only as that one bounded OpenRouter request.

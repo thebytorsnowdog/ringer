@@ -145,7 +145,6 @@ class QuotaFallbackTests(unittest.TestCase):
     def test_mid_run_quota_failure_stops_without_openrouter(self):
         for sub_engine, sub_model, effort in [
             ("gemini", "gemini-3.8-flash-low", "low"),
-            ("claude", "opus", "high"),
             ("codex", "gpt-5.4", "medium"),
             ("grok", "grok-4.7", "medium"),
         ]:

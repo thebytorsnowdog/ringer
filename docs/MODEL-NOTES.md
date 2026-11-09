@@ -12,6 +12,18 @@ ringer skill), append one dated line under the model. Say the task type,
 what happened, and what you'd do differently. Only write what the executed
 checks and raw logs support — no vibes, no worker self-reports.
 
+## Table routing (2026-11-09)
+
+The delegation table chooses the engine. `bounded-detail` uses the cheapest
+approved GLM/DeepSeek shortlist model on `openrouter`, unless the task names
+a flagship model, which stays on Codex, Grok, or Antigravity. An explicit
+shortlist model may only match that choice or a cheaper or equal one.
+`coordination` and `consequential` never go to OpenRouter. Claude is not a
+candidate. The caps stay £10 a month, £1 a run, and £0.25 a task, with no
+paid retry. A missing billing policy still refuses paid dispatch. Grok and
+Antigravity still fail closed when a policy is loaded and still run when it
+is not. The OpenRouter worker remains one request.
+
 ## codex (GPT-5-class, own harness)
 
 - Strongest general worker; the default engine. Spend reasoning effort per

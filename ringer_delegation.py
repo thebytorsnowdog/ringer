@@ -382,6 +382,198 @@ def catalogue_usd(model: str, input_tokens: int, output_tokens: int) -> str | No
     return format(usd, "f")
 
 
+class TableRouteError(ValueError):
+    """The delegation table refused this task. No engine was substituted."""
+
+
+@dataclass(frozen=True)
+class TableRoute:
+    engine: str
+    model: str
+    billing_route: str | None
+    task_class: str
+    reason: str
+
+
+_NATIVE_FOR_PROVIDER = {"openai": "codex", "xai": "grok", "google": "gemini"}
+_PAID_ENGINES = frozenset({"opencode", "openrouter"})
+_TABLE_CLASSES = frozenset({"bounded-detail", "coordination", "consequential"})
+
+
+def cheapest_shortlist_model() -> str:
+    """The shortlist model with the lower catalogue USD at the conservative token budget."""
+    table = load_matrix()
+    budget = table["conservative_budget"]
+    best_model = ""
+    best_amount: Decimal | None = None
+    for entry in table["shortlist"]:
+        usd = catalogue_usd(
+            entry["canonical"], int(budget["input_tokens"]), int(budget["output_tokens"]),
+        )
+        if usd is None:
+            continue
+        amount = Decimal(usd)
+        if best_amount is None or amount < best_amount:
+            best_model = entry["canonical"]
+            best_amount = amount
+    if not best_model:
+        raise TableRouteError("the shortlist has no catalogue price")
+    return best_model
+
+
+def _passthrough(engine: str, model: str, billing_route: str | None, task_class: str, reason: str) -> TableRoute:
+    return TableRoute(engine, model, billing_route, task_class, reason)
+
+
+def _native_route(
+    *,
+    engine: str,
+    model: str,
+    billing_route: str | None,
+    task_class: str,
+    configured_engines: set[str],
+    allow_api: bool,
+) -> TableRoute:
+    from ringer_capabilities import provider_for_model
+
+    provider = provider_for_model(model)
+    if provider in _NATIVE_FOR_PROVIDER:
+        required = _NATIVE_FOR_PROVIDER[provider]
+        if engine not in {required, "auto"}:
+            raise TableRouteError(f"{task_class or 'subscription'} model belongs on {required}")
+        if required not in configured_engines:
+            raise TableRouteError(f"{required} is not configured")
+        if billing_route == "api" and not allow_api:
+            raise TableRouteError("this class stays on the subscription route")
+        if billing_route not in {None, "subscription", "api"}:
+            raise TableRouteError(f"unsupported billing_route {billing_route!r}")
+        route = billing_route or "subscription"
+        return TableRoute(required, model, route, task_class, f"{required} subscription route")
+    if engine == "auto":
+        raise TableRouteError("name the subscription model or a configured native engine")
+    if engine not in {"codex", "grok", "gemini"}:
+        raise TableRouteError("name the subscription harness for this class")
+    if engine not in configured_engines:
+        raise TableRouteError(f"{engine} is not configured")
+    if billing_route == "api" and not allow_api:
+        raise TableRouteError("this class stays on the subscription route")
+    return _passthrough(engine, model, billing_route, task_class, "explicit subscription route")
+
+
+def _bounded_shortlist(
+    *,
+    engine: str,
+    model: str,
+    billing_route: str | None,
+    allowance: Any,
+    configured_engines: set[str],
+    policy: dict[str, Any] | None,
+    now: datetime | None,
+) -> TableRoute:
+    if billing_route not in {None, "api"}:
+        return _passthrough(engine, model, billing_route, "bounded-detail", "billing label left for the route gate")
+    if policy is None:
+        raise TableRouteError("paid dispatch requires a billing policy")
+    if engine == "opencode":
+        return _passthrough(
+            engine, model, billing_route or "api", "bounded-detail",
+            "OpenCode stays refused; admission does not dispatch it",
+        )
+    if "openrouter" not in configured_engines:
+        raise TableRouteError("openrouter engine is not configured")
+    if engine not in {"openrouter", "auto"}:
+        raise TableRouteError("shortlist work uses the openrouter engine")
+    table = load_matrix()
+    if allowance is None:
+        raise TableRouteError("paid API requires explicit task spend allowance")
+    selected = select_bounded_worker(policy=policy, now=now)
+    if not selected.allowed or not selected.estimated_cost_gbp:
+        raise TableRouteError(selected.reason)
+    chosen = model or selected.model
+    canonical = canonical_shortlist_model(chosen, table)
+    if canonical is None:
+        raise TableRouteError("model is not on the approved GLM/DeepSeek shortlist")
+    budget = table["conservative_budget"]
+    named = prepare_openrouter_dispatch(
+        model=canonical,
+        allowance=allowance,
+        attempt=1,
+        policy=policy,
+        now=now,
+        input_tokens=int(budget["input_tokens"]),
+        output_tokens=int(budget["output_tokens"]),
+        task_class="bounded-detail",
+        engine="openrouter",
+    )
+    if not named.allowed or named.estimated_cost_gbp is None:
+        raise TableRouteError(named.reason)
+    if Decimal(named.estimated_cost_gbp) > Decimal(selected.estimated_cost_gbp):
+        raise TableRouteError(
+            f"explicit model {canonical} is more expensive than the table's shortlist choice {selected.model}"
+        )
+    return TableRoute(
+        "openrouter", canonical, "api", "bounded-detail",
+        f"table chose {selected.model}; this task uses {canonical}",
+    )
+
+
+def route_from_table(
+    *,
+    engine: str,
+    model: str,
+    billing_route: str | None,
+    task_class: str,
+    allowance: Any,
+    configured_engines: set[str],
+    policy: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> TableRoute:
+    """Choose or check one task against registry/delegation-matrix.json.
+
+    A missing class does not become bounded-detail. Coordination and
+    consequential work never move to OpenRouter. An explicit bounded-detail
+    shortlist model may only confirm the table's choice or name a cheaper
+    or equal one. OpenCode is never selected.
+    """
+    from ringer_capabilities import provider_for_model
+
+    provider = provider_for_model(model)
+    if engine == "claude" or provider == "anthropic":
+        from ringer_capabilities import OPENROUTER_NOT_SELECTED
+        raise TableRouteError("no Claude subscription is available. " + OPENROUTER_NOT_SELECTED)
+    if task_class and task_class not in _TABLE_CLASSES:
+        raise TableRouteError(f"unknown task_class {task_class!r}")
+    paid = engine in _PAID_ENGINES or provider == "openrouter"
+    if task_class in {"coordination", "consequential"}:
+        if paid or engine == "auto" and provider == "openrouter":
+            raise TableRouteError("this class stays on the native subscription route")
+        return _native_route(
+            engine=engine, model=model, billing_route=billing_route, task_class=task_class,
+            configured_engines=configured_engines, allow_api=False,
+        )
+    if task_class == "bounded-detail":
+        if provider in _NATIVE_FOR_PROVIDER and engine not in _PAID_ENGINES:
+            return _native_route(
+                engine=engine, model=model, billing_route=billing_route, task_class=task_class,
+                configured_engines=configured_engines, allow_api=True,
+            )
+        if paid or engine == "auto":
+            if billing_route not in {None, "api"}:
+                return _passthrough(engine, model, billing_route, task_class, "billing label left for the route gate")
+            return _bounded_shortlist(
+                engine=engine, model=model, billing_route=billing_route, allowance=allowance,
+                configured_engines=configured_engines, policy=policy, now=now,
+            )
+        return _passthrough(engine, model, billing_route, task_class, "custom engine left unchanged")
+    if paid and billing_route == "api":
+        if policy is None:
+            raise TableRouteError("paid dispatch requires a billing policy")
+        raise TableRouteError(
+            "set task_class to bounded-detail; a missing class is not the table's bounded-detail row"
+        )
+    return _passthrough(engine, model, billing_route, task_class, "explicit route left unchanged")
+
+
 def select_bounded_worker(
     *,
     policy: dict[str, Any],

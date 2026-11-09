@@ -116,6 +116,7 @@ class BillingIntegrationTests(unittest.TestCase):
     def opencode_runner(self, route='api', *, enabled=True, **fields):
         task = dict(key='one', spec='Write out.txt with the requested result.', engine='opencode',
                     model='openrouter/z-ai/glm-5.3-flash', billing_route=route,
+                    task_class='bounded-detail',
                     task_spend_allowance_gbp=0.25, check='test -s out.txt', expect_files=['out.txt'])
         task.update(fields)
         manifest = ringer.Manifest.from_obj(dict(run_name='opencode-billing-test', workdir=str(self.root/'work'), tasks=[task]))

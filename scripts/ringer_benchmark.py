@@ -17,9 +17,8 @@ from benchmarks.reliability.cases import CASES, case_digest, get_case
 from benchmarks.reliability.checker import ROOT, digest, evaluate, source_digest, source_hashes
 
 MODELS = ('codex:gpt-5.6-luna', 'codex:gpt-5.6-terra', 'codex:gpt-5.6-sol',
-          'opencode:openrouter/moonshotai/kimi-k2.7-code', 'opencode:openrouter/z-ai/glm-5.2',
-          'opencode:openrouter/z-ai/glm-5.3-flash', 'opencode:openrouter/deepseek/deepseek-v4.1-flash',
-          'opencode:openrouter/xiaomi/mimo-v2.5', 'opencode:openrouter/google/gemini-3.8-flash')
+          'openrouter:openrouter/z-ai/glm-5.3-flash',
+          'openrouter:openrouter/deepseek/deepseek-v4.1-flash')
 SCRIPT = Path(__file__).resolve()
 
 
@@ -132,6 +131,7 @@ def generate(args):
                        '--score-dir', str(out / 'evidence'), '--cell-id', key,
                        '--generation-id', generation_id, '--require-notes']
             task = {'key': key, 'spec': case.spec, 'engine': engine, 'model': model,
+                    'task_class': 'bounded-detail',
                     'billing_route': 'subscription' if engine == 'codex' else 'api',
                     'task_type': case.task_type, 'timeout_s': args.timeout_s, 'max_attempts': 1,
                     'check_timeout_s': 60, 'check': shlex.join(command),
@@ -141,7 +141,7 @@ def generate(args):
                                     '-c', 'model_reasoning_effort="medium"'] if engine == 'codex' else [],
                     'benchmark': {'case_id': case.case_id, 'seed': case.seed, 'case_digest': case_digest(case),
                                   'spec_digest': case.spec_digest, 'check_digest': source_digest()}}
-            if engine == 'opencode' and allowance is not None:
+            if engine == 'openrouter' and allowance is not None:
                 task['task_spend_allowance_gbp'] = allowance
             manifest['tasks'].append(task)
             files[str(Path('tasks') / key / 'solution.py')] = case.starter.encode()

@@ -24,11 +24,65 @@ def _check_cmd(subcommand: str, *args: str) -> str:
     return " ".join(parts)
 
 
-def _engine_block(model: str) -> dict[str, object]:
-    """Return common engine-related task fields."""
+def _engine_block(model: str, task_class: str) -> dict[str, object]:
+    """Choose the engine from the delegation table. OpenCode and Claude are refused."""
+    from ringer_capabilities import provider_for_model
+    from decimal import Decimal
+
+    from ringer_delegation import (
+        TableRouteError,
+        canonical_shortlist_model,
+        catalogue_usd,
+        cheapest_shortlist_model,
+        load_matrix,
+    )
+
+    provider = provider_for_model(model)
+    if provider == "anthropic" or model.strip().lower() in {"opus", "sonnet", "haiku"}:
+        raise DiscoveryError("no Claude subscription is available")
+    if task_class in {"coordination", "consequential"}:
+        if canonical_shortlist_model(model) or provider == "openrouter":
+            raise DiscoveryError("this class stays on the native subscription route")
+        engine = {"openai": "codex", "xai": "grok", "google": "gemini"}.get(provider)
+        if engine is None:
+            raise DiscoveryError("name a codex, grok, or gemini model for this stage")
+        return {
+            "engine": engine,
+            "model": model,
+            "task_class": task_class,
+            "billing_route": "subscription",
+            "timeout_s": 1800,
+        }
+    if provider in {"openai", "xai", "google"}:
+        engine = {"openai": "codex", "xai": "grok", "google": "gemini"}[provider]
+        return {
+            "engine": engine,
+            "model": model,
+            "task_class": "bounded-detail",
+            "billing_route": "subscription",
+            "timeout_s": 1800,
+        }
+    try:
+        cheapest = cheapest_shortlist_model()
+    except TableRouteError as exc:
+        raise DiscoveryError(str(exc)) from exc
+    canonical = canonical_shortlist_model(model) if model else cheapest
+    if canonical is None:
+        raise DiscoveryError("bounded discovery work needs a shortlist model or a subscription flagship model")
+    budget = load_matrix()["conservative_budget"]
+    named_usd = catalogue_usd(canonical, int(budget["input_tokens"]), int(budget["output_tokens"]))
+    cheap_usd = catalogue_usd(cheapest, int(budget["input_tokens"]), int(budget["output_tokens"]))
+    if named_usd is None or cheap_usd is None or Decimal(named_usd) > Decimal(cheap_usd):
+        raise DiscoveryError(
+            f"explicit model {canonical} is more expensive than the table's shortlist choice {cheapest}"
+        )
     return {
-        "engine": "opencode",
-        "model": model,
+        "engine": "openrouter",
+        "model": canonical,
+        "task_class": "bounded-detail",
+        "billing_route": "api",
+        "max_attempts": 1,
+        "task_spend_allowance_gbp": 0.25,
         "timeout_s": 1800,
     }
 
@@ -114,7 +168,7 @@ def make_ingest_manifest(
             {
                 "key": key,
                 "task_type": "research",
-                **_engine_block(model),
+                **_engine_block(model, "bounded-detail"),
                 "spec": spec,
                 "check": check,
                 "expect_files": ["events.jsonl", "source_summary.json"],
@@ -210,7 +264,7 @@ def make_audit_manifest(
             {
                 "key": key,
                 "task_type": "research",
-                **_engine_block(model),
+                **_engine_block(model, "bounded-detail"),
                 "spec": _render_audit_spec(focus, db_path),
                 "check": check,
                 "expect_files": ["audit_notes.jsonl"] + (
@@ -294,7 +348,7 @@ def make_build_manifest(
         {
             "key": key,
             "task_type": "code-feature",
-            **_engine_block(model),
+            **_engine_block(model, "consequential"),
             "engine_args": ["--writable-root", str(build_root)],
             "spec": spec,
             "check": check,

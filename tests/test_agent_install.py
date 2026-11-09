@@ -60,95 +60,44 @@ class AgentInstallTests(unittest.TestCase):
                         handlers.append(handler)
         return handlers
 
-    def test_fresh_install_creates_skill_copy_and_hook_entries(self) -> None:
+    def test_bare_install_does_not_write_claude(self) -> None:
         result = self.run_cli("install-agent")
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(2, result.returncode)
+        self.assertIn("--codex", result.stderr)
+        self.assertIn("No Claude subscription", result.stderr)
+        self.assertFalse((self.home / ".claude").exists())
 
-        skill = self.home / ".claude" / "skills" / "ringer" / "SKILL.md"
-        self.assertTrue(skill.exists())
-        self.assertEqual((ROOT / ".claude" / "skills" / "ringer" / "SKILL.md").read_text(), skill.read_text())
+    def test_claude_flag_does_not_write_claude(self) -> None:
+        result = self.run_cli("install-agent", "--claude")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("No Claude subscription", result.stderr)
+        self.assertFalse((self.home / ".claude").exists())
+        project = Path(self.tmp.name) / "project"
+        project.mkdir()
+        project_result = self.run_cli("install-agent", "--claude", "--project", cwd=project)
+        self.assertEqual(2, project_result.returncode)
+        self.assertFalse((project / ".claude").exists())
 
-        settings = self.read_settings()
-        hooks = settings["hooks"]
-        self.assertIsInstance(hooks, dict)
-        self.assertEqual("Bash", hooks["PreToolUse"][0]["matcher"])
-        self.assertEqual("command", hooks["PreToolUse"][0]["hooks"][0]["type"])
-        self.assertIn("ringer_nudge.py", hooks["PreToolUse"][0]["hooks"][0]["command"])
-        self.assertTrue(hooks["PreToolUse"][0]["hooks"][0]["command"].endswith(" pre-bash"))
-        self.assertEqual("Edit|Write", hooks["PostToolUse"][0]["matcher"])
-        self.assertIn("ringer_nudge.py", hooks["PostToolUse"][0]["hooks"][0]["command"])
-        self.assertTrue(hooks["PostToolUse"][0]["hooks"][0]["command"].endswith(" post-edit"))
-
-    def test_second_install_is_idempotent(self) -> None:
-        first = self.run_cli("install-agent")
-        self.assertEqual(0, first.returncode, first.stderr)
-        settings_before = self.read_settings()
-
-        second = self.run_cli("install-agent")
-        self.assertEqual(0, second.returncode, second.stderr)
-        settings_after = self.read_settings()
-
-        self.assertEqual(settings_before, settings_after)
-        self.assertEqual(2, len(self.ringer_handlers(settings_after)))
-
-    def test_install_preserves_unrelated_hooks_and_settings_keys(self) -> None:
+    def test_uninstall_claude_removes_only_ringer_entries(self) -> None:
         claude = self.home / ".claude"
-        claude.mkdir()
+        skill = claude / "skills" / "ringer"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("leftover", encoding="utf-8")
         settings_path = claude / "settings.json"
-        settings_path.write_text(
-            json.dumps(
-                {
-                    "theme": "dark",
-                    "hooks": {
-                        "PreToolUse": [
-                            {
-                                "matcher": "Bash",
-                                "hooks": [
-                                    {
-                                        "type": "command",
-                                        "command": "echo unrelated",
-                                    }
-                                ],
-                            }
-                        ]
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        result = self.run_cli("install-agent")
-        self.assertEqual(0, result.returncode, result.stderr)
-
-        settings = self.read_settings()
-        self.assertEqual("dark", settings["theme"])
-        pre_groups = settings["hooks"]["PreToolUse"]
-        commands = [handler["command"] for group in pre_groups for handler in group["hooks"]]
-        self.assertIn("echo unrelated", commands)
-        self.assertEqual(1, len(list(claude.glob("settings.json.bak-*"))))
-
-    def test_uninstall_removes_only_ringer_entries_and_skill_dir(self) -> None:
-        install = self.run_cli("install-agent")
-        self.assertEqual(0, install.returncode, install.stderr)
-        settings_path = self.home / ".claude" / "settings.json"
-        settings = self.read_settings()
-        settings["hooks"]["PreToolUse"].append(
-            {
-                "matcher": "Bash",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": "echo keep-me",
-                    }
-                ],
-            }
-        )
-        settings["custom"] = {"keep": True}
-        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-
-        uninstall = self.run_cli("uninstall-agent")
+        settings_path.write_text(json.dumps({
+            "custom": {"keep": True},
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 ringer_nudge.py pre-bash"}]},
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo keep-me"}]},
+                ]
+            },
+        }), encoding="utf-8")
+        bare = self.run_cli("uninstall-agent")
+        self.assertEqual(2, bare.returncode)
+        self.assertTrue((skill / "SKILL.md").exists())
+        uninstall = self.run_cli("uninstall-agent", "--claude")
         self.assertEqual(0, uninstall.returncode, uninstall.stderr)
-
         after = self.read_settings()
         self.assertEqual({"keep": True}, after["custom"])
         self.assertEqual([], self.ringer_handlers(after))
@@ -158,24 +107,7 @@ class AgentInstallTests(unittest.TestCase):
             for handler in group["hooks"]
         ]
         self.assertEqual(["echo keep-me"], kept)
-        self.assertFalse((self.home / ".claude" / "skills" / "ringer").exists())
-
-    def test_project_variant_writes_under_temp_cwd(self) -> None:
-        project = Path(self.tmp.name) / "project"
-        project.mkdir()
-        os.symlink(ROOT / "ringer.py", project / "ringer.py")
-
-        install = self.run_cli("install-agent", "--project", cwd=project)
-        self.assertEqual(0, install.returncode, install.stderr)
-        self.assertTrue((project / ".claude" / "skills" / "ringer" / "SKILL.md").exists())
-        self.assertTrue((project / ".claude" / "settings.json").exists())
-        self.assertFalse((self.home / ".claude").exists())
-
-        uninstall = self.run_cli("uninstall-agent", "--project", cwd=project)
-        self.assertEqual(0, uninstall.returncode, uninstall.stderr)
-        self.assertFalse((project / ".claude" / "skills" / "ringer").exists())
-        settings = self.read_settings(project)
-        self.assertEqual([], self.ringer_handlers(settings))
+        self.assertFalse(skill.exists())
 
     def test_fresh_codex_install_creates_skill_and_hooks(self) -> None:
         result = self.run_cli("install-agent", "--codex")

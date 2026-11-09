@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Mapping
 
 OPENROUTER_ENGINES = frozenset({"opencode", "openrouter"})
-NATIVE_ENGINES = ("codex", "grok", "gemini", "claude")
+NATIVE_ENGINES = ("codex", "grok", "gemini")
 
 # These defaults are the ones the worker adapters already resolve. Tests keep
 # them aligned with engines/gemini_worker.py and engines/openrouter_worker.py.
@@ -202,6 +202,14 @@ def assess_explicit_route(
 ) -> RouteDecision:
     """Accept the named engine, or block it. Never returns a different engine."""
     provider = provider_for_model(model)
+    if engine == "claude" or provider == "anthropic":
+        return _blocked(
+            engine or "claude",
+            model,
+            billing_route,
+            "anthropic" if provider == "unspecified" else provider,
+            "no Claude subscription is available. " + OPENROUTER_NOT_SELECTED,
+        )
     if engine in OPENROUTER_ENGINES:
         if billing_route != "api":
             return _blocked(
@@ -298,6 +306,11 @@ def choose_unspecified_route(
     """
     present = set(available)
     requested = billing_route or "subscription"
+    if originating == "claude" or provider == "anthropic":
+        return _blocked(
+            "", model, requested, provider,
+            "no Claude subscription is available. " + OPENROUTER_NOT_SELECTED,
+        )
     if provider == "openrouter":
         if not openrouter_consent:
             return _blocked(
@@ -394,7 +407,7 @@ def declared_runtime_dependencies(bin_path: str) -> tuple[str, ...]:
     if base == "gemini_worker.py":
         return ("agy",)
     if base == "openrouter_worker.py":
-        return ("claude",)
+        return ()
     if path.exists() and _wrapper_needs_opencode(path):
         return ("opencode",)
     if base == "opencode-sandboxed.sh":

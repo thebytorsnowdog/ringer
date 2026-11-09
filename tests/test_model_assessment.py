@@ -429,7 +429,7 @@ class ModelAssessmentBoundaryTests(unittest.TestCase):
         api_config = self.config({"opencode": paid_engine}, policy=policy)
         api_raw = self.raw_manifest([
             self.task(engine="opencode", model="openrouter/z-ai/glm-5.3-flash", billing_route="api",
-                      task_spend_allowance_gbp=0.25)
+                      task_class="bounded-detail", task_spend_allowance_gbp=0.25)
         ])
         api_manifest = self.assessed(api_raw, api_config, effort="medium")
         api_runner = ringer.RingerRunner(api_manifest, api_config, "test", dashboard_enabled=False)

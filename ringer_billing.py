@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from ringer_capabilities import subscription_probe
+from ringer_capabilities import OPENROUTER_NOT_SELECTED, subscription_probe
 from ringer_costs import SpendLedger, billing_preflight, estimate_event, parse_usage_lines, validate_cost_policy
 from ringer_delegation import catalogue_usd, prepare_openrouter_dispatch
 
@@ -310,7 +310,7 @@ class Admission:
 async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 route: str | None, allowance: Any, command: list[str], spec: str,
                 taskdir: Path, state_dir: Path, run_id: str, task_key: str,
-                attempt: int, timeout_s: float = 10) -> tuple[Admission, list[str]]:
+                attempt: int, timeout_s: float = 10, task_class: str = "") -> tuple[Admission, list[str]]:
     evidence = dict(billing_route=route, observed_auth_mode=None, quota_observed_at=None,
                     reservation_id=None, reservation_status="not_reserved", billing_status="BLOCKED",
                     billing_attempt_index=attempt, usage_coverage="unknown", cost_coverage="unknown")
@@ -343,7 +343,12 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 command = enforce_openrouter_command(command, model, spec)
             except ValueError as exc:
                 return blocked(str(exc), "permission")
-        elif engine in {"grok", "gemini", "claude"}:
+        elif engine == "claude":
+            return blocked(
+                "no Claude subscription is available. " + OPENROUTER_NOT_SELECTED,
+                "permission",
+            )
+        elif engine in {"grok", "gemini"}:
             probe = subscription_probe(engine)
             if route == "api":
                 return blocked(
@@ -360,6 +365,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
             planned = prepare_openrouter_dispatch(
                 model=model, allowance=allowance, attempt=attempt, policy=policy,
                 input_tokens=bounds[0], output_tokens=bounds[1], engine=engine,
+                task_class=task_class,
             )
             evidence.update(planned.evidence())
             if not planned.allowed or planned.policy is None or planned.reserve_gbp is None:

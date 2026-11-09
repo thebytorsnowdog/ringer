@@ -157,11 +157,17 @@ class ModelAssessmentBoundaryTests(unittest.TestCase):
         self.assertEqual("high", validated["sol"]["effort"])
         self.assertEqual("medium", validated["terra"]["effort"])
         self.assertEqual("standard", validated["terra"]["service_tier"])
+        paid = ringer.build_worker_command(
+            config.engines["opencode"], taskdir=self.root / "terra", spec=manifest.tasks[1].spec,
+            full_access=False, model=manifest.tasks[1].model, reasoning_effort="medium",
+        )
+        self.assertNotIn("--variant", paid)
+        self.assertNotIn("--dir", paid)
         runner = ringer.RingerRunner(manifest, config, "test", dashboard_enabled=False)
-        self.assertEqual(0, asyncio.run(runner.run()))
-        self.assertIn("model_reasoning_effort=high", runner.runtimes[0].last_worker_command)
-        self.assertNotIn("--variant", runner.runtimes[1].last_worker_command or "")
-        self.assertNotIn("--dir", runner.runtimes[1].last_worker_command or "")
+        self.assertNotEqual(0, asyncio.run(runner.run()))
+        self.assertEqual("pass", runner.runtimes[0].status)
+        self.assertEqual(0, runner.runtimes[1].attempts)
+        self.assertIn("billing policy", runner.runtimes[1].setup_error or "")
 
     def test_spec_or_checker_change_invalidates_old_binding(self):
         config = self.config()

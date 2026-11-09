@@ -146,6 +146,28 @@ class DelegationMatrixTests(unittest.TestCase):
         self.assertEqual("bounded-detail", decision.task_class)
         self.assertEqual("user-chat-2026-11-08T21:11:00Z", decision.approval_id)
         self.assertIsNotNone(decision.estimated_cost_gbp)
+        admitted = select_bounded_worker(policy=policy(
+            task_api_cap_gbp="0.25", paid_retries=False,
+        ), now=NOW)
+        self.assertTrue(admitted.allowed, admitted.reason)
+        self.assertEqual("openrouter/z-ai/glm-5.3-flash", admitted.model)
+        self.assertEqual(admitted.estimated_cost_gbp, admitted.reserve_gbp)
+        self.assertLessEqual(Decimal(admitted.reserve_gbp), Decimal("0.25"))
+        oversized = prepare_openrouter_dispatch(
+            model="openrouter/deepseek/deepseek-v4.1-flash", allowance="0.25", attempt=1,
+            policy=policy(task_api_cap_gbp="0.25", paid_retries=False), now=NOW,
+            input_tokens=200000, output_tokens=100000, engine="openrouter",
+        )
+        self.assertFalse(oversized.allowed)
+        self.assertIsNone(oversized.reserve_gbp)
+        self.assertIn("single-request budget", oversized.reason)
+        same_bounds = prepare_openrouter_dispatch(
+            model="openrouter/z-ai/glm-5.3-flash", allowance="0.25", attempt=1,
+            policy=policy(task_api_cap_gbp="0.25", paid_retries=False), now=NOW,
+            input_tokens=200000, output_tokens=64000, engine="opencode",
+        )
+        self.assertFalse(same_bounds.allowed)
+        self.assertIn("not a provider hard cap", same_bounds.reason)
         coordination = prepare_openrouter_dispatch(
             model="openrouter/z-ai/glm-5.3-flash", allowance="0.25", attempt=1,
             policy=policy(), now=NOW, task_class="coordination",

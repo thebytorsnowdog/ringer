@@ -19,7 +19,7 @@ from typing import Any
 
 from ringer_capabilities import subscription_probe
 from ringer_costs import SpendLedger, billing_preflight, estimate_event, parse_usage_lines, validate_cost_policy
-from ringer_delegation import prepare_openrouter_dispatch
+from ringer_delegation import catalogue_usd, prepare_openrouter_dispatch
 
 
 def task_billing_fields(obj: dict[str, Any], key: str) -> dict[str, Any]:
@@ -271,6 +271,35 @@ def enforce_opencode_command(command: list[str], model: str, spec: str) -> list[
     return command
 
 
+def _flag_values(command: list[str], flag: str) -> list[str]:
+    return [command[index + 1] for index, arg in enumerate(command) if arg == flag and index + 1 < len(command)]
+
+
+def _command_token_bounds(command: list[str]) -> tuple[int | None, int | None]:
+    def one(flag: str) -> int | None:
+        values = _flag_values(command, flag)
+        if len(values) != 1 or not values[0].isdigit() or int(values[0]) <= 0:
+            return None
+        return int(values[0])
+    return one("--max-input-tokens"), one("--max-tokens")
+
+
+def enforce_openrouter_command(command: list[str], model: str, spec: str) -> list[str]:
+    """Accept one bounded OpenRouter completion. The worker must not be OpenCode."""
+    if not model.startswith("openrouter/") or "/" not in model.removeprefix("openrouter/"):
+        raise ValueError("paid OpenRouter requires an explicit openrouter/provider/model")
+    if not command or command[-1] != spec:
+        raise ValueError("billing requires the OpenRouter spec as the final argument")
+    if any(arg in {"--api-key", "--auth"} or arg.startswith(("--api-key=", "--auth=")) for arg in command):
+        raise ValueError("billing rejects an API key on the OpenRouter command")
+    models = _flag_values(command, "-m") + _flag_values(command, "--model")
+    if models != [model] or "#" in model:
+        raise ValueError("billing requires exactly one OpenRouter model matching the task model")
+    if _command_token_bounds(command)[0] is None or _command_token_bounds(command)[1] is None:
+        raise ValueError("the OpenRouter single request must name --max-input-tokens and --max-tokens")
+    return command
+
+
 @dataclass
 class Admission:
     allowed: bool
@@ -300,11 +329,18 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 command = enforce_codex_command(command, model, route, spec)
             except ValueError as exc:
                 return blocked(str(exc), "permission")
-        elif engine in {"opencode", "openrouter"}:
+        elif engine == "opencode":
             if route != "api":
                 return blocked("OpenCode requires an explicit API billing route", "permission")
             try:
                 command = enforce_opencode_command(command, model, spec)
+            except ValueError as exc:
+                return blocked(str(exc), "permission")
+        elif engine == "openrouter":
+            if route != "api":
+                return blocked("OpenRouter requires an explicit API billing route", "permission")
+            try:
+                command = enforce_openrouter_command(command, model, spec)
             except ValueError as exc:
                 return blocked(str(exc), "permission")
         elif engine in {"grok", "gemini", "claude"}:
@@ -320,8 +356,10 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
         if route == "api" and "run_api_cap_gbp" not in policy:
             return blocked("paid API requires an explicit run_api_cap_gbp", "unknown")
         if engine in {"opencode", "openrouter"}:
+            bounds = _command_token_bounds(command) if engine == "openrouter" else (None, None)
             planned = prepare_openrouter_dispatch(
                 model=model, allowance=allowance, attempt=attempt, policy=policy,
+                input_tokens=bounds[0], output_tokens=bounds[1], engine=engine,
             )
             evidence.update(planned.evidence())
             if not planned.allowed or planned.policy is None or planned.reserve_gbp is None:
@@ -416,6 +454,18 @@ def usage_evidence(text: str, model: str, *, complete: bool, policy: dict[str, A
 
 def settle_admission(admission: Admission, state_dir: Path, usage: dict[str, Any]) -> None:
     evidence = admission.evidence
+    if usage.get("actual_cost_usd") is None:
+        completed = [event for event in usage.get("usage_events") or [] if event.get("source") == "turn.completed"]
+        if len(completed) == 1 and None not in (completed[0].get("input_tokens"), completed[0].get("output_tokens")):
+            priced = catalogue_usd(
+                str(completed[0].get("model") or evidence.get("model") or ""),
+                int(completed[0]["input_tokens"]),
+                int(completed[0]["output_tokens"]),
+            )
+            if priced is not None:
+                usage = dict(usage)
+                usage["actual_cost_usd"] = priced
+                usage["cost_coverage"] = "catalogue-priced-reported-tokens"
     evidence.update(usage)
     identity = evidence.get("reservation_id")
     if identity is None:

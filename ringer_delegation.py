@@ -176,6 +176,7 @@ def prepare_openrouter_dispatch(
     matrix: dict[str, Any] | None = None,
     catalogue: dict[str, Any] | None = None,
     task_class: str = "bounded-detail",
+    engine: str = "opencode",
 ) -> DelegationDecision:
     """Decide whether one planned OpenRouter attempt may reserve spend. Does not reserve."""
     table = matrix if matrix is not None else load_matrix()
@@ -289,26 +290,96 @@ def prepare_openrouter_dispatch(
     narrowed = dict(policy)
     narrowed["monthly_api_cap_gbp"] = str(monthly_cap)
     narrowed["run_api_cap_gbp"] = str(run_cap)
+    if engine != "openrouter":
+        return DelegationDecision(
+            False,
+            "OpenCode 2.2.6 tag dc2ffcf sets agent steps and sends model limit.output as "
+            "max_tokens or max_completion_tokens on a primary request. "
+            "The same source retries a provider call up to 10 times, continues a length finish "
+            "up to three times inside one step, and omits maxTokens on the title request. "
+            "The seatbelt profile can write ~/.config/opencode, so a task-local steps or output "
+            "value is not a fixed ceiling. "
+            f"£{estimate} is an estimate, not a provider hard cap, so this attempt is not dispatched.",
+            "permission",
+            complexity,
+            task_class,
+            canonical,
+            "opencode",
+            "api",
+            str(estimate),
+            approval_id,
+            reserve_gbp=None,
+            policy=narrowed,
+        )
+    if input_tokens is None or output_tokens is None:
+        return DelegationDecision(
+            False,
+            "the OpenRouter single request must name --max-input-tokens and --max-tokens",
+            "permission", complexity, task_class, canonical, "openrouter", "api", str(estimate), approval_id,
+        )
+    budget = table["conservative_budget"]
+    if input_tokens > int(budget["input_tokens"]) or output_tokens > int(budget["output_tokens"]):
+        return DelegationDecision(
+            False,
+            "token bound exceeds the approved single-request budget",
+            "permission", complexity, task_class, canonical, "openrouter", "api", str(estimate), approval_id,
+        )
+    if "task_api_cap_gbp" not in policy or "paid_retries" not in policy:
+        return DelegationDecision(
+            False,
+            "cost policy must set task_api_cap_gbp and paid_retries",
+            "permission", complexity, task_class, canonical, "openrouter", "api", str(estimate), approval_id,
+        )
+    if policy.get("paid_retries") is not False:
+        return DelegationDecision(
+            False,
+            "no automatic paid retries",
+            "permission", complexity, task_class, canonical, "openrouter", "api", str(estimate), approval_id,
+        )
+    try:
+        file_task = _decimal(policy["task_api_cap_gbp"])
+    except (ValueError, ArithmeticError):
+        return DelegationDecision(
+            False, "task_api_cap_gbp must be a positive amount", "permission",
+            complexity, task_class, canonical, "openrouter", "api", str(estimate), approval_id,
+        )
+    if file_task <= 0 or file_task > task_cap or estimate > file_task:
+        return DelegationDecision(
+            False,
+            f"worst-case spend £{estimate} exceeds the explicit task cap £{file_task}",
+            "permission", complexity, task_class, canonical, "openrouter", "api", str(estimate), approval_id,
+        )
     return DelegationDecision(
-        False,
-        "OpenCode 2.2.6 tag dc2ffcf sets agent steps and sends model limit.output as "
-        "max_tokens or max_completion_tokens on a primary request. "
-        "The same source retries a provider call up to 10 times, continues a length finish "
-        "up to three times inside one step, and omits maxTokens on the title request. "
-        "The seatbelt profile can write ~/.config/opencode, so a task-local steps or output "
-        "value is not a fixed ceiling. "
-        f"£{estimate} is an estimate, not a provider hard cap, so this attempt is not dispatched.",
+        True,
+        "one OpenRouter request reserved at the worst case of its token bounds",
         "permission",
         complexity,
         task_class,
         canonical,
-        "opencode",
+        "openrouter",
         "api",
         str(estimate),
         approval_id,
-        reserve_gbp=None,
+        reserve_gbp=str(estimate),
         policy=narrowed,
     )
+
+
+def catalogue_usd(model: str, input_tokens: int, output_tokens: int) -> str | None:
+    """USD for reported tokens at the stored catalogue price. None when the model is off the shortlist."""
+    slug = model.removeprefix("openrouter/")
+    row = load_catalogue().get("models", {}).get(slug)
+    if not isinstance(row, dict) or not row.get("on_initial_shortlist"):
+        return None
+    try:
+        usd = (Decimal(input_tokens) * Decimal(row["prompt"])) + (
+            Decimal(output_tokens) * Decimal(row["completion"])
+        )
+    except (KeyError, ArithmeticError, ValueError):
+        return None
+    if usd < 0:
+        return None
+    return format(usd, "f")
 
 
 def select_bounded_worker(
@@ -323,15 +394,17 @@ def select_bounded_worker(
     best: DelegationDecision | None = None
     best_amount: Decimal | None = None
     for entry in table["shortlist"]:
+        bounds = table["conservative_budget"]
         decision = prepare_openrouter_dispatch(
             model=entry["canonical"],
             allowance=table["approval"]["task_gbp"],
             attempt=1,
             policy=policy,
             now=now,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            input_tokens=int(bounds["input_tokens"]) if input_tokens is None else input_tokens,
+            output_tokens=int(bounds["output_tokens"]) if output_tokens is None else output_tokens,
             task_class="bounded-detail",
+            engine="openrouter",
         )
         if not decision.allowed or decision.estimated_cost_gbp is None:
             continue

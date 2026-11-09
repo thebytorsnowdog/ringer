@@ -9361,6 +9361,11 @@ class RingerRunner:
                     runtime.failure_class = "quota"
                     await self._record_prepare_error(runtime, self._stop_quota(runtime, cap_reason))
                     return
+            if (
+                runtime.task.engine in {"opencode", "openrouter"} or runtime.task.billing_route == "api"
+            ) and self.config.billing_policy_path is None:
+                await self._record_prepare_error(runtime, "paid dispatch requires a billing policy")
+                return
             attempt = 1
             max_attempts = runtime.task.max_attempts
             while attempt <= max_attempts:
@@ -10684,6 +10689,8 @@ def enforce_explicit_routes(manifest: Manifest, config: AppConfig) -> None:
     """
     loaded = config.billing_policy_path is not None
     for task in manifest.tasks:
+        if not loaded and (task.engine in {"opencode", "openrouter"} or task.billing_route == "api"):
+            raise ValueError(f"task {task.key}: paid dispatch requires a billing policy")
         engine = config.engines.get(task.engine)
         model = task.model or (engine.model_default if engine is not None else "")
         decision = assess_explicit_route(

@@ -159,7 +159,8 @@ def validate_cost_policy(raw: Any) -> dict[str, Any]:
         raise ValueError("cost policy must be an object")
     allowed = {"monthly_api_cap_gbp", "run_api_cap_gbp", "automatic_paid_fallback",
                "subscription_auth_modes", "fx", "monthly_subscription_gbp",
-               "subscription_fee_evidence", "snapshot_max_age_seconds", "pricing"}
+               "subscription_fee_evidence", "snapshot_max_age_seconds", "pricing",
+               "task_api_cap_gbp", "paid_retries"}
     if any(not isinstance(key, str) for key in raw):
         raise ValueError("cost policy keys must be strings")
     if set(raw) - allowed:
@@ -176,9 +177,13 @@ def validate_cost_policy(raw: Any) -> dict[str, Any]:
     result = {"monthly_api_cap_gbp": str(_decimal(raw.get("monthly_api_cap_gbp", 0), "cap")),
               "automatic_paid_fallback": fallback, "subscription_auth_modes": sorted(set(modes)),
               "snapshot_max_age_seconds": age}
-    for key in ("run_api_cap_gbp", "monthly_subscription_gbp"):
+    for key in ("run_api_cap_gbp", "monthly_subscription_gbp", "task_api_cap_gbp"):
         if key in raw:
-            result[key] = str(_decimal(raw[key], key))
+            result[key] = str(_decimal(raw[key], key, positive=key == "task_api_cap_gbp"))
+    if "paid_retries" in raw:
+        if type(raw["paid_retries"]) is not bool:
+            raise ValueError("paid_retries must be boolean")
+        result["paid_retries"] = raw["paid_retries"]
     if "subscription_fee_evidence" in raw:
         if not _text(raw["subscription_fee_evidence"]):
             raise ValueError("subscription_fee_evidence must be text")

@@ -102,7 +102,10 @@ class CapabilityMatrixTests(unittest.TestCase):
         gemini = _load_worker("gemini_worker_caps", "engines/gemini_worker.py")
         openrouter = _load_worker("openrouter_worker_caps", "engines/openrouter_worker.py")
         self.assertEqual(gemini.DEFAULT_AGY_BIN, str(Path(DEFAULT_AGY_BIN).expanduser()))
-        self.assertEqual(openrouter.DEFAULT_CLAUDE_BIN, str(Path(DEFAULT_CLAUDE_BIN).expanduser()))
+        self.assertFalse(hasattr(openrouter, "DEFAULT_CLAUDE_BIN"))
+        body = openrouter.completion_body("openrouter/z-ai/glm-5.3-flash", "hello", 64)
+        self.assertEqual(64, body["max_tokens"])
+        self.assertNotIn("tools", body)
 
     def test_unspecified_route_prefers_native_subscription_and_refuses_openrouter(self) -> None:
         cases = [
@@ -471,6 +474,35 @@ class DispatchFailureTests(unittest.TestCase):
         self.assertEqual("DISABLED", runtime.billing.get("billing_status"))
         self.assertFalse((self.root / "paid.txt").exists())
         self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
+
+    def test_paid_engine_without_a_policy_does_not_start(self) -> None:
+        stub = self._stub("paid-open", "#!/bin/sh\necho paid >> {self.marker}\nprintf 'ok\\n' > out.txt\n".format(self=self))
+        for engine in ("openrouter", "opencode"):
+            with self.subTest(engine=engine):
+                if self.marker.exists():
+                    self.marker.unlink()
+                manifest = ringer.Manifest.from_obj({
+                    "run_name": f"no-policy-{engine}",
+                    "workdir": str(self.root / "work" / engine),
+                    "tasks": [{
+                        "key": "one", "spec": "Write out.txt", "engine": engine,
+                        "model": "openrouter/z-ai/glm-5.3-flash", "billing_route": "api",
+                        "task_spend_allowance_gbp": 0.25, "max_attempts": 1,
+                        "check": "grep -q ok out.txt", "expect_files": ["out.txt"],
+                    }],
+                })
+                config = self._config({
+                    engine: ringer.EngineConfig(
+                        name=engine, bin=str(stub),
+                        args_template=("--max-input-tokens", "200000", "--max-tokens", "64000", "-m", "{model}", "{spec}"),
+                        full_access_args=(), sandbox_args=(), token_regex=None,
+                    ),
+                })
+                runner = self._run(manifest, config)
+                self.assertEqual(0, runner.runtimes[0].attempts)
+                self.assertIn("billing policy", runner.runtimes[0].setup_error or "")
+                self.assertFalse(self.marker.exists())
+                self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
 
     def test_provider_error_does_not_switch_to_the_configured_openrouter_bin(self) -> None:
         codex = self._stub("codex", "#!/bin/sh\necho 'error: connection refused' >&2\nexit 1\n")

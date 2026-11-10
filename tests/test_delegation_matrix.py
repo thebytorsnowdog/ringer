@@ -15,11 +15,13 @@ import json
 from ringer_billing import enforce_opencode_command
 from ringer_costs import billing_preflight
 from ringer_delegation import (
+    TableRouteError,
     canonical_shortlist_model,
     fx_from_ecb_csv,
     load_catalogue,
     load_matrix,
     prepare_openrouter_dispatch,
+    route_from_table,
     select_bounded_worker,
 )
 
@@ -222,6 +224,62 @@ class DelegationMatrixTests(unittest.TestCase):
         assert decision.policy is not None
         self.assertEqual("10", decision.policy["monthly_api_cap_gbp"])
         self.assertEqual("1", decision.policy["run_api_cap_gbp"])
+
+    def _engines(self) -> set[str]:
+        return {"codex", "grok", "gemini", "openrouter", "opencode"}
+
+    def _paid(self):
+        return policy(task_api_cap_gbp="0.25", paid_retries=False)
+
+    def test_table_keeps_a_flagship_and_prices_the_shortlist(self) -> None:
+        flagship = route_from_table(
+            engine="codex", model="gpt-5.6-sol", billing_route="subscription",
+            task_class="bounded-detail", allowance=None, configured_engines=self._engines(),
+            policy=self._paid(), now=NOW,
+        )
+        self.assertEqual("codex", flagship.engine)
+        self.assertEqual("gpt-5.6-sol", flagship.model)
+        chosen = route_from_table(
+            engine="auto", model="", billing_route=None, task_class="bounded-detail",
+            allowance="0.25", configured_engines=self._engines(), policy=self._paid(), now=NOW,
+        )
+        self.assertEqual("openrouter", chosen.engine)
+        self.assertEqual("openrouter/z-ai/glm-5.3-flash", chosen.model)
+        self.assertEqual("api", chosen.billing_route)
+        same = route_from_table(
+            engine="openrouter", model="openrouter/z-ai/glm-5.3-flash", billing_route="api",
+            task_class="bounded-detail", allowance="0.25", configured_engines=self._engines(),
+            policy=self._paid(), now=NOW,
+        )
+        self.assertEqual("openrouter/z-ai/glm-5.3-flash", same.model)
+        with self.assertRaisesRegex(TableRouteError, "more expensive"):
+            route_from_table(
+                engine="openrouter", model="openrouter/deepseek/deepseek-v4.1-flash",
+                billing_route="api", task_class="bounded-detail", allowance="0.25",
+                configured_engines=self._engines(), policy=self._paid(), now=NOW,
+            )
+
+    def test_coordination_and_consequential_never_select_openrouter(self) -> None:
+        for task_class in ("coordination", "consequential"):
+            with self.subTest(task_class=task_class):
+                with self.assertRaisesRegex(TableRouteError, "native subscription"):
+                    route_from_table(
+                        engine="openrouter", model="openrouter/z-ai/glm-5.3-flash",
+                        billing_route="api", task_class=task_class, allowance="0.25",
+                        configured_engines=self._engines(), policy=self._paid(), now=NOW,
+                    )
+        kept = route_from_table(
+            engine="grok", model="grok-4.7", billing_route="subscription",
+            task_class="coordination", allowance=None, configured_engines=self._engines(),
+            policy=None, now=NOW,
+        )
+        self.assertEqual("grok", kept.engine)
+        with self.assertRaisesRegex(TableRouteError, "no Claude subscription"):
+            route_from_table(
+                engine="claude", model="opus", billing_route="subscription",
+                task_class="", allowance=None, configured_engines=self._engines(),
+                policy=None,
+            )
 
 
 if __name__ == "__main__":

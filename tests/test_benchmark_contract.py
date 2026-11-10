@@ -167,7 +167,10 @@ class BenchmarkContractTests(unittest.TestCase):
         out, manifest = self.generate(cases='utc-order,20', models=','.join(CLI.MODELS))
         self.assertEqual(2 * len(CLI.MODELS), len(manifest['tasks']))
         self.assertEqual({'utc-order', 'cost-rate'}, {task['benchmark']['case_id'] for task in manifest['tasks']})
-        self.assertTrue(all(not task['engine_args'] for task in manifest['tasks'] if task['engine'] == 'opencode'))
+        self.assertTrue(all(not task['engine_args'] for task in manifest['tasks'] if task['engine'] == 'openrouter'))
+        self.assertNotIn('opencode:', ','.join(CLI.MODELS))
+        self.assertIn('openrouter:openrouter/z-ai/glm-5.3-flash', CLI.MODELS)
+        self.assertIn('openrouter:openrouter/deepseek/deepseek-v4.1-flash', CLI.MODELS)
 
     def test_atomic_refusal_idempotency_and_output_containment(self):
         out, manifest = self.generate()
@@ -272,15 +275,16 @@ class BenchmarkContractTests(unittest.TestCase):
             self.assertEqual('subscription' if task['engine'] == 'codex' else 'api', task.get('billing_route'))
             self.assertNotIn('task_spend_allowance_gbp', task)
 
-    def test_gemini_selector_is_a_bounded_paid_api_cell(self):
-        selector = 'opencode:openrouter/google/gemini-3.8-flash'
+    def test_shortlist_selector_is_a_bounded_paid_api_cell(self):
+        selector = 'openrouter:openrouter/z-ai/glm-5.3-flash'
         out = self.directory / 'gemini-with-allowance'
         result = cli('generate', '--out', out, '--models', selector, '--cases', '1',
                      '--task-spend-allowance-gbp', '0.25')
         self.assertEqual(0, result.returncode, result.stderr)
         task = ringer.Manifest.from_path(out / 'manifest.json').tasks[0]
-        self.assertEqual('openrouter/google/gemini-3.8-flash', task.model)
-        self.assertEqual('opencode', task.engine)
+        self.assertEqual('openrouter/z-ai/glm-5.3-flash', task.model)
+        self.assertEqual('openrouter', task.engine)
+        self.assertEqual('bounded-detail', task.task_class)
         self.assertEqual('api', task.billing_route)
         self.assertEqual(1, task.max_attempts)
         self.assertEqual(.25, task.task_spend_allowance_gbp)
@@ -305,7 +309,7 @@ class BenchmarkContractTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         tasks = ringer.Manifest.from_path(out / 'manifest.json').tasks
         for task in tasks:
-            self.assertEqual(.25 if task.engine == 'opencode' else None, task.task_spend_allowance_gbp)
+            self.assertEqual(.25 if task.engine == 'openrouter' else None, task.task_spend_allowance_gbp)
 
     def test_legacy_worker_log_uses_independently_captured_state_check_pointer(self):
         out, manifest = self.generate(cases='1')
@@ -379,7 +383,7 @@ class BenchmarkContractTests(unittest.TestCase):
     def test_generated_paid_allowance_cannot_override_zero_local_cap(self):
         import ringer_billing
         out = self.directory / 'paid-zero-cap'
-        result = cli('generate', '--out', out, '--models', 'opencode:openrouter/z-ai/glm-5.3-flash',
+        result = cli('generate', '--out', out, '--models', 'openrouter:openrouter/z-ai/glm-5.3-flash',
                      '--cases', '1', '--task-spend-allowance-gbp', '0.25')
         self.assertEqual(0, result.returncode, result.stderr)
         task = ringer.Manifest.from_path(out / 'manifest.json').tasks[0]
@@ -390,8 +394,9 @@ class BenchmarkContractTests(unittest.TestCase):
         }))
         admission, _ = asyncio.run(ringer_billing.admit(policy_path=policy, engine=task.engine,
             binary='unused-local-fixture', model=task.model, route=task.billing_route,
-            allowance=task.task_spend_allowance_gbp,
-            command=['unused-local-fixture', 'run', '--standalone', '--auto', '--format', 'json', '--model', task.model, task.spec],
+            allowance=task.task_spend_allowance_gbp, task_class=task.task_class,
+            command=['unused-local-fixture', '--max-input-tokens', '200000', '--max-tokens', '64000',
+                     '-m', task.model, task.spec],
             spec=task.spec, taskdir=out, state_dir=out/'state', run_id='fixture', task_key=task.key, attempt=1))
         self.assertFalse(admission.allowed)
         self.assertEqual('BLOCKED', admission.evidence['billing_status'])

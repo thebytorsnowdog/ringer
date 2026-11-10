@@ -103,6 +103,7 @@ class CapabilityMatrixTests(unittest.TestCase):
         openrouter = _load_worker("openrouter_worker_caps", "engines/openrouter_worker.py")
         self.assertEqual(gemini.DEFAULT_AGY_BIN, str(Path(DEFAULT_AGY_BIN).expanduser()))
         self.assertFalse(hasattr(openrouter, "DEFAULT_CLAUDE_BIN"))
+        self.assertEqual((), missing_runtime_dependencies(str(ROOT / "engines" / "openrouter_worker.py"), {}))
         body = openrouter.completion_body("openrouter/z-ai/glm-5.3-flash", "hello", 64)
         self.assertEqual(64, body["max_tokens"])
         self.assertNotIn("tools", body)
@@ -127,8 +128,8 @@ class CapabilityMatrixTests(unittest.TestCase):
             ("codex", "openrouter", "api", {"codex", "opencode"}, True, "allowed", "opencode", True),
             ("codex", "openrouter", "api", {"openrouter"}, True, "allowed", "openrouter", True),
             ("codex", "openai", "subscription", {"codex", "opencode"}, True, "allowed", "codex", False),
-            ("claude", "anthropic", "subscription", {"claude", "opencode"}, False, "allowed", "claude", False),
-            ("claude", "anthropic", "api", {"claude", "opencode"}, False, "blocked", "claude", False),
+            ("claude", "anthropic", "subscription", {"claude", "opencode"}, False, "blocked", "", False),
+            ("claude", "anthropic", "api", {"claude", "opencode"}, False, "blocked", "", False),
         ]
         for origin, provider, route, available, consent, status, engine, spends in cases:
             with self.subTest(origin=origin, provider=provider, route=route, available=sorted(available), consent=consent):
@@ -148,6 +149,26 @@ class CapabilityMatrixTests(unittest.TestCase):
                 if status == "allowed" and route == "subscription" and provider == "openai":
                     self.assertIn("ChatGPT", decision.reason)
                     self.assertIn("api_key", decision.reason)
+
+    def test_claude_is_blocked_with_and_without_a_policy(self) -> None:
+        for loaded in (False, True):
+            decision = assess_explicit_route(
+                engine="claude", model="opus", billing_route="subscription",
+                billing_policy_loaded=loaded,
+            )
+            self.assertEqual("blocked", decision.status)
+            self.assertIn("no Claude subscription", decision.reason)
+        for engine in ("grok", "gemini"):
+            open_route = assess_explicit_route(
+                engine=engine, model="grok-4.7" if engine == "grok" else "gemini-4-argon-medium",
+                billing_route="subscription", billing_policy_loaded=False,
+            )
+            self.assertEqual("allowed", open_route.status, engine)
+            closed = assess_explicit_route(
+                engine=engine, model=open_route.model, billing_route="subscription",
+                billing_policy_loaded=True,
+            )
+            self.assertEqual("blocked", closed.status, engine)
 
     def test_explicit_route_is_kept_or_blocked_without_a_substitute(self) -> None:
         kept = assess_explicit_route(
@@ -397,9 +418,9 @@ class DispatchFailureTests(unittest.TestCase):
             ("gemini", "gemini-4-argon-medium", "subscription", "keyring"),
             ("gemini", "gemini-4-argon-medium", None, "keyring"),
             ("gemini", "gemini-4-argon-medium", "api", "no API-key route"),
-            ("claude", "opus", "subscription", "not observed subscription evidence"),
-            ("claude", "opus", None, "not observed subscription evidence"),
-            ("claude", "opus", "api", "no API-key route"),
+            ("claude", "opus", "subscription", "no Claude subscription"),
+            ("claude", "opus", None, "no Claude subscription"),
+            ("claude", "opus", "api", "no Claude subscription"),
         )
         for engine, model, route, reason in cases:
             with self.subTest(engine=engine, route=route):
@@ -474,6 +495,77 @@ class DispatchFailureTests(unittest.TestCase):
         self.assertEqual("DISABLED", runtime.billing.get("billing_status"))
         self.assertFalse((self.root / "paid.txt").exists())
         self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
+
+    def test_claude_without_a_policy_does_not_run(self) -> None:
+        stub = self._stub("claude-open", "#!/bin/sh\nprintf 'ok\\n' > out.txt\n")
+        manifest = ringer.Manifest.from_obj({
+            "run_name": "claude-no-policy",
+            "workdir": str(self.root / "work-claude"),
+            "tasks": [{
+                "key": "one", "spec": "Write out.txt", "engine": "claude", "model": "opus",
+                "billing_route": "subscription", "max_attempts": 1,
+                "check": "grep -q ok out.txt", "expect_files": ["out.txt"],
+            }],
+        })
+        config = self._config({
+            "claude": ringer.EngineConfig(
+                name="claude", bin=str(stub), args_template=("-p", "{spec}"),
+                full_access_args=(), sandbox_args=(), token_regex=None, model_default="opus",
+            ),
+        })
+        runner = self._run(manifest, config)
+        self.assertEqual(0, runner.runtimes[0].attempts)
+        self.assertIn("no Claude subscription", runner.runtimes[0].setup_error or "")
+        self.assertFalse((self.root / "work-claude" / "one" / "out.txt").exists())
+
+    def test_table_selects_glm_and_reserves_without_switching_a_quota_stop(self) -> None:
+        paid = self._stub("paid-table", "#!/bin/sh\nprintf 'ok\\n' > out.txt\n")
+        policy = self.root / "table-policy.json"
+        policy.write_text(json.dumps({
+            "monthly_api_cap_gbp": "10", "run_api_cap_gbp": "1",
+            "task_api_cap_gbp": "0.25", "paid_retries": False,
+            "automatic_paid_fallback": False, "subscription_auth_modes": ["chatgpt"],
+            "fx": {"usd_to_gbp": "0.8", "dated": "2026-11-08"},
+        }), encoding="utf-8")
+        manifest = ringer.Manifest.from_obj({
+            "run_name": "table-select",
+            "workdir": str(self.root / "work-table"),
+            "tasks": [{
+                "key": "one", "spec": "Write out.txt", "task_class": "bounded-detail",
+                "task_spend_allowance_gbp": 0.25, "max_attempts": 1,
+                "check": "grep -q ok out.txt", "expect_files": ["out.txt"],
+            }],
+        })
+        config = self._config({
+            "openrouter": ringer.EngineConfig(
+                name="openrouter", bin=str(paid),
+                args_template=("--max-input-tokens", "200000", "--max-tokens", "64000", "-m", "{model}", "{spec}"),
+                full_access_args=(), sandbox_args=(), token_regex=None,
+            ),
+        }, policy)
+        runner = self._run(manifest, config)
+        runtime = runner.runtimes[0]
+        self.assertEqual("openrouter", runtime.task.engine)
+        self.assertEqual("openrouter/z-ai/glm-5.3-flash", runtime.task.model)
+        self.assertEqual("pass", runtime.status, runtime.setup_error)
+        ledger = json.loads((self.root / "state" / "cost-reservations.json").read_text())
+        self.assertTrue(ledger["reservations"])
+        blocked = ringer.Manifest.from_obj({
+            "run_name": "table-coordination",
+            "workdir": str(self.root / "work-coordination"),
+            "tasks": [{
+                "key": "one", "spec": "Write out.txt", "engine": "openrouter",
+                "model": "openrouter/z-ai/glm-5.3-flash", "billing_route": "api",
+                "task_class": "coordination", "task_spend_allowance_gbp": 0.25,
+                "max_attempts": 1, "check": "grep -q ok out.txt", "expect_files": ["out.txt"],
+            }],
+        })
+        before = (self.root / "state" / "cost-reservations.json").read_text()
+        blocked_runner = self._run(blocked, config)
+        self.assertEqual(0, blocked_runner.runtimes[0].attempts)
+        self.assertIn("native subscription", blocked_runner.runtimes[0].setup_error or "")
+        self.assertEqual("openrouter", blocked_runner.runtimes[0].task.engine)
+        self.assertEqual(before, (self.root / "state" / "cost-reservations.json").read_text())
 
     def test_paid_engine_without_a_policy_does_not_start(self) -> None:
         stub = self._stub("paid-open", "#!/bin/sh\necho paid >> {self.marker}\nprintf 'ok\\n' > out.txt\n".format(self=self))
@@ -603,6 +695,7 @@ class DispatchFailureTests(unittest.TestCase):
             "tasks": [{
                 "key": "one", "spec": "Write out.txt with ok.", "engine": "opencode",
                 "model": "openrouter/z-ai/glm-5.3-flash", "billing_route": "api",
+                "task_class": "bounded-detail",
                 "task_spend_allowance_gbp": 0.25, "check": "grep -q ok out.txt",
                 "expect_files": ["out.txt"],
             }],
@@ -661,6 +754,14 @@ class WrapperPreflightTests(unittest.TestCase):
         )
         self.assertEqual(("codex",), present)
         self.assertEqual(("opencode",), missing_runtime_dependencies(str(self.root / "opencode-sandboxed.sh"), self.env))
+        worker = self.root / "openrouter_worker.py"
+        worker.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        present = inventory_engines(
+            {"openrouter": str(worker), "codex": "codex"},
+            self.env,
+        )
+        self.assertEqual(("openrouter", "codex"), present)
+        self.assertEqual((), missing_runtime_dependencies(str(worker), self.env))
 
     def test_codex_preflight_does_not_require_opencode(self) -> None:
         codex = self.bindir / "codex"

@@ -12,7 +12,26 @@ ringer skill), append one dated line under the model. Say the task type,
 what happened, and what you'd do differently. Only write what the executed
 checks and raw logs support — no vibes, no worker self-reports.
 
-Current routing is `docs/MODEL-ROUTING.md`. Claude is unsupported. Hermes is retired. Rows below that name either one are historical run records, not a route you can select.
+## Table routing (2026-11-09)
+
+Independent tasks are a swarm. The coordinator routes by
+`registry/delegation-matrix.json`. `route_from_table()` chooses the engine
+from `task_class`, and `admit()` passes that class into the paid check.
+`bounded-detail` uses the cheapest approved GLM/DeepSeek shortlist model on
+`openrouter`, unless the task names a flagship model, which stays on Codex,
+Grok, or Antigravity. An explicit shortlist model may only confirm that
+choice or name a cheaper or equal one. At the stored catalogue prices the
+cheapest model is `openrouter/z-ai/glm-5.3-flash`. `coordination` and
+`consequential` stay on the subscription harness. Claude is refused with or
+without a policy file. Hermes is retired. Rows below that name either one
+are historical run records, not a route you can select. The caps stay £10 a
+month, £1 a run, and £0.25 a task, with no paid retry and no automatic paid
+fallback. A missing billing policy still refuses paid dispatch. Grok and
+Antigravity fail closed when a policy is loaded, because no subscription
+probe is implemented, and a subscription task can still start when no policy
+file is loaded. The OpenRouter worker remains one request and does not
+depend on the Claude binary. `ask` takes `--task-class`. Paid tasks need
+`task_class`. Current routing detail is `docs/MODEL-ROUTING.md`.
 
 ## codex (GPT-5-class, own harness)
 

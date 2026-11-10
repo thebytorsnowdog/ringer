@@ -39,7 +39,8 @@ import uuid
 from ringer_billing import (
     Admission, admit, billing_policy_path, task_billing_fields, usage_evidence, settle_admission,
 )
-from ringer_costs import SpendLedger
+from ringer_costs import SpendLedger, validate_cost_policy
+from ringer_delegation import TableRouteError, route_from_table
 from ringer_routing import (
     ASSESSMENT_SCHEMA,
     ModelAssessmentError,
@@ -1786,6 +1787,7 @@ class TaskSpec:
     # Which model a harness engine should run for this task (fills the
     # engine's {model} placeholder); empty means the engine's model_default.
     model: str = ""
+    task_class: str = ""
     task_type: str = ""
     check_timeout_s: float = CHECK_TIMEOUT_S
     preflight_timeout_s: float = 15
@@ -1824,6 +1826,7 @@ class TaskSpec:
             "engine_args": list(self.engine_args),
             "verified": self.verified,
             "model": self.model,
+            "task_class": self.task_class,
             "task_type": self.task_type,
             "check_timeout_s": self.check_timeout_s,
             "preflight_timeout_s": self.preflight_timeout_s,
@@ -1867,9 +1870,13 @@ class TaskSpec:
         expect_files = obj.get("expect_files", [])
         if not isinstance(expect_files, list):
             raise ValueError(f"task {key}: expect_files must be a list")
-        engine = str(obj.get("engine", DEFAULT_ENGINE_NAME)).strip()
-        if not engine:
-            raise ValueError(f"task {key}: engine must not be empty")
+        if "engine" in obj:
+            engine = str(obj.get("engine") or "").strip()
+            if not engine:
+                raise ValueError(f"task {key}: engine must not be empty")
+        else:
+            named_class = obj.get("task_class", "")
+            engine = "auto" if isinstance(named_class, str) and named_class.strip() else DEFAULT_ENGINE_NAME
         timeout_s = int(obj.get("timeout_s", DEFAULT_TIMEOUT_S))
         if timeout_s <= 0:
             raise ValueError(f"task {key}: timeout_s must be positive")
@@ -1894,6 +1901,14 @@ class TaskSpec:
         model = obj.get("model", "")
         if not isinstance(model, str):
             raise ValueError(f"task {key}: model must be a string (e.g. 'openrouter/z-ai/glm-5.2')")
+        task_class = obj.get("task_class", "")
+        if not isinstance(task_class, str):
+            raise ValueError(f"task {key}: task_class must be a string")
+        task_class = task_class.strip()
+        if task_class and task_class not in {"bounded-detail", "coordination", "consequential"}:
+            raise ValueError(
+                f"task {key}: task_class must be bounded-detail, coordination, or consequential"
+            )
         task_type = obj.get("task_type", "")
         if not isinstance(task_type, str):
             raise ValueError(f"task {key}: task_type must be a string")
@@ -1910,6 +1925,7 @@ class TaskSpec:
             engine_args=tuple(engine_args),
             verified=verified.strip(),
             model=model.strip(),
+            task_class=task_class,
             task_type=task_type.strip(),
             **reliability_fields(obj, key),
             **task_billing_fields(obj, key),
@@ -9243,10 +9259,7 @@ class RingerRunner:
                 runtime.attempt_open = False
             self._terminal(runtime, "fail" if runtime.attempts else "blocked", "ERROR" if runtime.attempts else "BLOCKED")
 
-    async def _preflight(self, runtime: TaskRuntime) -> tuple[str | None, str]:
-        task = runtime.task
-        if task.full_access and not self.config.allow_full_access:
-            return "permission", "full_access requested but config allow_full_access is false"
+    def _engine_ready(self, runtime: TaskRuntime, task: TaskSpec) -> tuple[str | None, str]:
         if task.engine not in self.config.engines:
             return "missing_dependency", f"unknown worker engine: {task.engine}"
         engine_bin = self.config.engines[task.engine].bin
@@ -9256,6 +9269,29 @@ class RingerRunner:
         missing_runtime = missing_runtime_dependencies(engine_bin, os.environ)
         if missing_runtime:
             return "missing_dependency", missing_runtime_message(task.engine, engine_bin, missing_runtime)
+        return None, ""
+
+    async def _preflight(self, runtime: TaskRuntime) -> tuple[str | None, str]:
+        task = runtime.task
+        if task.full_access and not self.config.allow_full_access:
+            return "permission", "full_access requested but config allow_full_access is false"
+        if task.engine != "auto":
+            ready_failure, ready_detail = self._engine_ready(runtime, task)
+            if ready_failure:
+                return ready_failure, ready_detail
+        try:
+            policy = load_billing_policy(self.config)
+            resolved = resolve_task_route(task, self.config, policy)
+        except TableRouteError as exc:
+            return "permission", f"task {task.key}: {exc}"
+        except (OSError, ValueError) as exc:
+            return "permission", f"task {task.key}: {exc}"
+        if resolved is not task:
+            runtime.task = resolved
+            task = resolved
+            ready_failure, ready_detail = self._engine_ready(runtime, task)
+            if ready_failure:
+                return ready_failure, ready_detail
         route_decision = assess_explicit_route(
             engine=task.engine,
             model=task.model or self.config.engines[task.engine].model_default,
@@ -9390,7 +9426,8 @@ class RingerRunner:
                         command=cmd, spec=command_spec, taskdir=runtime.taskdir,
                         state_dir=self.config.state_dir, run_id=self.run_id,
                         task_key=runtime.task.key, attempt=attempt,
-                        timeout_s=min(10, runtime.task.preflight_timeout_s))
+                        timeout_s=min(10, runtime.task.preflight_timeout_s),
+                        task_class=runtime.task.task_class)
                     runtime.billing = runtime.admission.evidence
                     if not runtime.admission.allowed:
                         runtime.failure_class = runtime.billing["billing_failure_class"]
@@ -10681,12 +10718,56 @@ def preflight_engine_bins(manifest: Manifest, config: AppConfig) -> None:
             raise ValueError(missing_runtime_message(name, bin_path, missing_runtime))
 
 
-def enforce_explicit_routes(manifest: Manifest, config: AppConfig) -> None:
-    """Refuse unsupported harness/provider/billing combinations before spend.
+def load_billing_policy(config: AppConfig) -> dict[str, Any] | None:
+    if config.billing_policy_path is None:
+        return None
+    return validate_cost_policy(json.loads(config.billing_policy_path.read_text(encoding="utf-8")))
 
-    The task's engine is left as written. This function does not select a
-    replacement harness.
-    """
+
+def resolve_task_route(task: TaskSpec, config: AppConfig, policy: dict[str, Any] | None) -> TaskSpec:
+    """Apply the delegation table. A refused task raises; a quota stop does not rewrite the engine."""
+    chosen = route_from_table(
+        engine=task.engine,
+        model=task.model,
+        billing_route=task.billing_route,
+        task_class=task.task_class,
+        allowance=task.task_spend_allowance_gbp,
+        configured_engines=set(config.engines),
+        policy=policy,
+    )
+    if (
+        chosen.engine == task.engine
+        and chosen.model == task.model
+        and chosen.billing_route == task.billing_route
+        and chosen.task_class == task.task_class
+    ):
+        return task
+    return dataclass_replace(
+        task,
+        engine=chosen.engine,
+        model=chosen.model,
+        billing_route=chosen.billing_route,
+        task_class=chosen.task_class,
+    )
+
+
+def apply_table_routes(manifest: Manifest, config: AppConfig) -> Manifest:
+    policy = load_billing_policy(config)
+    tasks = []
+    for task in manifest.tasks:
+        try:
+            tasks.append(resolve_task_route(task, config, policy))
+        except TableRouteError as exc:
+            raise TableRouteError(f"task {task.key}: {exc}") from exc
+    return dataclass_replace(manifest, tasks=tuple(tasks))
+
+
+def enforce_explicit_routes(manifest: Manifest, config: AppConfig) -> Manifest:
+    """Check the delegation table, then refuse a harness the table did not leave in place."""
+    try:
+        manifest = apply_table_routes(manifest, config)
+    except TableRouteError as exc:
+        raise ValueError(str(exc)) from exc
     loaded = config.billing_policy_path is not None
     for task in manifest.tasks:
         if not loaded and (task.engine in {"opencode", "openrouter"} or task.billing_route == "api"):
@@ -10701,6 +10782,7 @@ def enforce_explicit_routes(manifest: Manifest, config: AppConfig) -> None:
         )
         if decision.status != "allowed":
             raise ValueError(f"task {task.key}: {decision.reason}")
+    return manifest
 
 
 def validate_manifest_engines(manifest: Manifest, config: AppConfig) -> None:
@@ -11286,18 +11368,6 @@ def print_summary(run_id: str, runtimes: list[TaskRuntime]) -> None:
         print("\nretry admission blocked (earlier attempts retained):")
         for runtime in billing_blocks:
             print(f"  {runtime.task.key}: {runtime.setup_error}")
-    fallbacks = [r for r in runtimes if r.quota_fallback]
-    if fallbacks:
-        print("\nusage cap fallbacks (reverted to OpenRouter):")
-        for runtime in fallbacks:
-            info = runtime.quota_fallback or {}
-            print(
-                f"  {runtime.task.key}: {info.get('original_engine')}/{info.get('original_model')} "
-                f"-> {info.get('fallback_engine')}/{info.get('fallback_model')} "
-                f"({info.get('trigger')}: {info.get('reason')})"
-            )
-
-
 def create_demo_manifest(assessment_path: Path | None = None) -> Path:
     root = Path(tempfile.mkdtemp(prefix="ringer-demo-"))
     workdir = root / "work"
@@ -11386,6 +11456,7 @@ def one_request_manifest(
     redact: bool,
     billing_route: str | None = None,
     task_spend_allowance_gbp: float | None = None,
+    task_class: str = "",
     model_assessment: dict[str, Any] | None = None,
 ) -> Manifest:
     engine_args: list[str] = []
@@ -11408,6 +11479,7 @@ def one_request_manifest(
         "engine_args": engine_args,
         "model": model or "",
         "billing_route": billing_route,
+        "task_class": task_class,
         "task_spend_allowance_gbp": task_spend_allowance_gbp,
         "verified": (
             "answer.md exists and is not empty; this does not prove "
@@ -11541,6 +11613,7 @@ def run_one_request(config: AppConfig, args: argparse.Namespace) -> int:
         redact=args.redact,
         billing_route=billing_route,
         task_spend_allowance_gbp=getattr(args, "task_spend_allowance_gbp", None),
+        task_class=getattr(args, "task_class", "") or "",
         model_assessment=assessment,
     )
     validate_manifest_engines(manifest, config)
@@ -11572,8 +11645,8 @@ def run_one_request(config: AppConfig, args: argparse.Namespace) -> int:
             ) from exc
     else:
         validate_manifest_model_assessment(manifest, config)
+    manifest = enforce_explicit_routes(manifest, config)
     preflight_engine_bins(manifest, config)
-    enforce_explicit_routes(manifest, config)
     identity = resolve_identity(
         args.identity,
         config,
@@ -12258,6 +12331,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit billing route; billing-enabled Codex defaults to subscription",
     )
     ask_parser.add_argument(
+        "--task-class",
+        choices=("bounded-detail", "coordination", "consequential"),
+        default="",
+        help="delegation-table class; required before a paid shortlist route",
+    )
+    ask_parser.add_argument(
         "--task-spend-allowance-gbp", type=float,
         help="explicit finite positive GBP allowance for a paid API task; policy caps still apply",
     )
@@ -12409,13 +12488,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON model_assessment bound to the generated demo tasks",
     )
 
-    install_parser = subparsers.add_parser("install-agent", help="install the ringer skill and hooks for Claude Code or Codex")
+    install_parser = subparsers.add_parser("install-agent", help="install the ringer skill and hooks for Codex")
     install_parser.add_argument("--project", action="store_true", help="install under the current project instead of the user config directory")
-    install_parser.add_argument("--codex", action="store_true", help="install for Codex under .codex instead of Claude Code")
+    install_parser.add_argument("--codex", action="store_true", help="install for Codex under .agents and .codex")
+    install_parser.add_argument("--claude", action="store_true", help=argparse.SUPPRESS)
 
-    uninstall_parser = subparsers.add_parser("uninstall-agent", help="remove the ringer skill and hooks for Claude Code or Codex")
+    uninstall_parser = subparsers.add_parser("uninstall-agent", help="remove the ringer skill and hooks")
     uninstall_parser.add_argument("--project", action="store_true", help="remove from the current project instead of the user config directory")
-    uninstall_parser.add_argument("--codex", action="store_true", help="remove the Codex installation instead of Claude Code")
+    uninstall_parser.add_argument("--codex", action="store_true", help="remove the Codex installation")
+    uninstall_parser.add_argument("--claude", action="store_true", help="remove a leftover Claude Code installation")
     return parser
 
 
@@ -12461,13 +12542,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Self-update skipped: {result.reason or 'not available'}.")
             return 0
         if args.command == "install-agent":
-            if args.codex:
-                return install_codex_agent(project=args.project)
-            return install_agent(project=args.project)
+            if args.claude or not args.codex:
+                print(
+                    "install-agent requires --codex. No Claude subscription is available, "
+                    "so this command does not write .claude.",
+                    file=sys.stderr,
+                )
+                return 2
+            return install_codex_agent(project=args.project)
         if args.command == "uninstall-agent":
-            if args.codex:
-                return uninstall_codex_agent(project=args.project)
-            return uninstall_agent(project=args.project)
+            if args.claude and args.codex:
+                print("uninstall-agent accepts one of --codex or --claude.", file=sys.stderr)
+                return 2
+            if args.claude:
+                return uninstall_agent(project=args.project)
+            if not args.codex:
+                print("uninstall-agent requires --codex or --claude.", file=sys.stderr)
+                return 2
+            return uninstall_codex_agent(project=args.project)
 
         if args.command == "lint":
             manifest = Manifest.from_path(args.manifest)
@@ -12580,8 +12672,8 @@ def main(argv: list[str] | None = None) -> int:
             # Deliberately before preflight_engine_bins: baseline spawns no
             # workers, so a missing engine binary must not block it.
             return asyncio.run(run_baseline(manifest, config=config))
+        manifest = enforce_explicit_routes(manifest, config)
         preflight_engine_bins(manifest, config)
-        enforce_explicit_routes(manifest, config)
         if args.command == "run":
             start_catalog_auto_refresh()
         if dashboard_enabled and not args.browser:

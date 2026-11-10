@@ -21,7 +21,7 @@ Every stage is read-only until the chosen build. Raw work history is never copie
 
 ## A concise end-to-end example
 
-The manifest commands below write `engine` `opencode`. Admission refuses that engine, so linting the file is not permission to spend. A paid task you actually dispatch uses `engine` `openrouter`, a shortlist model from `docs/DELEGATION-MATRIX.md`, and a billing policy file. Claude is unsupported. Hermes is retired.
+Ingest and audit manifests use `task_class` `bounded-detail`. A shortlist model such as `openrouter/z-ai/glm-5.3-flash` is written as `engine` `openrouter`. The build manifest is `consequential`, so it needs a Codex, Grok, or Gemini model and stays on that subscription engine. A paid OpenRouter task still needs a billing policy file. No policy file means no paid dispatch. Claude is unsupported. Hermes is retired.
 
 ```bash
 # From the Ringer repository root
@@ -49,7 +49,7 @@ python3 ringer-discover.py make-ingest-manifest \
   --out ./my-discovery/ingest.json
 
 ./ringer.py lint ./my-discovery/ingest.json
-# Admission refuses the generated engine. Merge a task dir only after a route that admission allows.
+# A paid ingest manifest still needs a billing policy before dispatch.
 python3 ringer-discover.py merge-ingest --write-root ./my-discovery --source 1 ./my-discovery/ingest-1-...
 
 python3 ringer-discover.py make-audit-manifest \
@@ -76,7 +76,7 @@ python3 ringer-discover.py choose-offer --write-root ./my-discovery --confirm 1
 
 python3 ringer-discover.py make-build-manifest \
   --write-root ./my-discovery \
-  --model openrouter/z-ai/glm-5.3-flash \
+  --model gpt-5.6-sol \
   --out ./my-discovery/build.json
 
 # After running the build manifest, merge the validated staged receipts

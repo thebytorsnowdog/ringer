@@ -549,6 +549,7 @@ class AskBillingTests(unittest.TestCase):
                 timeout_s=args.timeout_s, reasoning_effort=args.reasoning_effort,
                 model=model, redact=args.redact, billing_route=route,
                 task_spend_allowance_gbp=args.task_spend_allowance_gbp,
+                task_class=getattr(args, 'task_class', '') or '',
             )
             assessment = ringer.assessment_draft_for_manifest(
                 draft_manifest, self.config, coordinator='fixture'
@@ -661,7 +662,8 @@ class AskBillingTests(unittest.TestCase):
     def test_opencode_explicit_route_and_model_reach_real_admission(self):
         self.add_opencode()
         self.assertEqual(1, self.run_ask('--engine', 'opencode', '--billing-route', 'api',
-            '--model', 'openrouter/z-ai/glm-5.3-flash', '--task-spend-allowance-gbp', '0.25'))
+            '--model', 'openrouter/z-ai/glm-5.3-flash', '--task-class', 'bounded-detail',
+            '--task-spend-allowance-gbp', '0.25'))
         self.assertEqual('openrouter/z-ai/glm-5.3-flash', self.admission.call_args.kwargs['model'])
         self.assertEqual('api', self.admission.call_args.kwargs['route'])
         self.account_probe.assert_not_awaited()

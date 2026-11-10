@@ -90,13 +90,16 @@ class ManifestLintTests(unittest.TestCase):
         config = Path(td) / "ringer-config.toml"
         config.write_text(
             "require_model_assessment = true\n\n"
-            "[engines.opencode]\n"
-            'bin = "opencode"\n'
-            'args_template = ["{taskdir}", "{access_args}", "run", "-m", "{model}", '
-            '"--dangerously-skip-permissions", "--format", "json", "{engine_args}", '
-            '"--dir", "{taskdir}", "{spec}"]\n'
+            "[engines.openrouter]\n"
+            'bin = "openrouter"\n'
+            'args_template = ["--max-input-tokens", "200000", "--max-tokens", "64000", "-m", "{model}", "{spec}"]\n'
             "sandbox_args = []\n"
-            'full_access_args = ["--no-sandbox"]\n',
+            "full_access_args = []\n"
+            "[engines.codex]\n"
+            'bin = "codex"\n'
+            'args_template = ["exec", "{model_args}", "{engine_args}", "{spec}"]\n'
+            'sandbox_args = ["--sandbox", "workspace-write"]\n'
+            'full_access_args = ["--dangerously-bypass-approvals-and-sandbox"]\n',
             encoding="utf-8",
         )
         return run(str(RINGER), "--config", str(config), "lint", manifest, check=False)
@@ -111,7 +114,7 @@ class ManifestLintTests(unittest.TestCase):
         run_cli("approve-sources", "--write-root", td, "--confirm")
         run_cli(
             "make-ingest-manifest", "--write-root", td,
-            "--model", "openrouter/moonshotai/glm-5.2",
+            "--model", "openrouter/z-ai/glm-5.3-flash",
             "--out", os.path.join(td, "ingest.json"),
         )
         task_dir = Path(td) / "ingest-1-history"
@@ -165,7 +168,7 @@ class ManifestLintTests(unittest.TestCase):
             run_cli("approve-sources", "--write-root", td, "--confirm")
             run_cli(
                 "make-ingest-manifest", "--write-root", td,
-                "--model", "openrouter/moonshotai/glm-5.2",
+                "--model", "openrouter/z-ai/glm-5.3-flash",
                 "--out", os.path.join(td, "ingest.json"),
             )
             result = self._lint(td, os.path.join(td, "ingest.json"))
@@ -177,7 +180,7 @@ class ManifestLintTests(unittest.TestCase):
             self._build_corpus_with_chosen_offer(td)
             run_cli(
                 "make-audit-manifest", "--write-root", td,
-                "--model", "openrouter/moonshotai/glm-5.2",
+                "--model", "openrouter/z-ai/glm-5.3-flash",
                 "--out", os.path.join(td, "audit.json"),
             )
             result = self._lint(td, os.path.join(td, "audit.json"))
@@ -190,7 +193,7 @@ class ManifestLintTests(unittest.TestCase):
             run_cli("choose-offer", "--write-root", td, "--confirm", "1")
             run_cli(
                 "make-build-manifest", "--write-root", td,
-                "--model", "openrouter/moonshotai/glm-5.2",
+                "--model", "gpt-5.6-sol",
                 "--out", os.path.join(td, "build.json"),
             )
             result = self._lint(td, os.path.join(td, "build.json"))
@@ -432,10 +435,13 @@ class BuildTests(unittest.TestCase):
             run_cli("choose-offer", "--write-root", td, "--confirm", "1")
             run_cli(
                 "make-build-manifest", "--write-root", td,
-                "--model", "openrouter/moonshotai/glm-5.2",
+                "--model", "gpt-5.6-sol",
                 "--out", os.path.join(td, "build.json"),
             )
             manifest = json.loads((Path(td) / "build.json").read_text())
+            self.assertEqual("codex", manifest["tasks"][0]["engine"])
+            self.assertEqual("consequential", manifest["tasks"][0]["task_class"])
+            self.assertNotEqual("opencode", manifest["tasks"][0]["engine"])
             spec = manifest["tasks"][0]["spec"]
             build_root_lines = [
                 line for line in spec.splitlines()

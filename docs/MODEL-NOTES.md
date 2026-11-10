@@ -14,15 +14,24 @@ checks and raw logs support — no vibes, no worker self-reports.
 
 ## Table routing (2026-11-09)
 
-The delegation table chooses the engine. `bounded-detail` uses the cheapest
-approved GLM/DeepSeek shortlist model on `openrouter`, unless the task names
-a flagship model, which stays on Codex, Grok, or Antigravity. An explicit
-shortlist model may only match that choice or a cheaper or equal one.
-`coordination` and `consequential` never go to OpenRouter. Claude is not a
-candidate. The caps stay £10 a month, £1 a run, and £0.25 a task, with no
-paid retry. A missing billing policy still refuses paid dispatch. Grok and
-Antigravity still fail closed when a policy is loaded and still run when it
-is not. The OpenRouter worker remains one request.
+Independent tasks are a swarm. The coordinator routes by
+`registry/delegation-matrix.json`. `route_from_table()` chooses the engine
+from `task_class`, and `admit()` passes that class into the paid check.
+`bounded-detail` uses the cheapest approved GLM/DeepSeek shortlist model on
+`openrouter`, unless the task names a flagship model, which stays on Codex,
+Grok, or Antigravity. An explicit shortlist model may only confirm that
+choice or name a cheaper or equal one. At the stored catalogue prices the
+cheapest model is `openrouter/z-ai/glm-5.3-flash`. `coordination` and
+`consequential` stay on the subscription harness. Claude is refused with or
+without a policy file. Hermes is retired. Rows below that name either one
+are historical run records, not a route you can select. The caps stay £10 a
+month, £1 a run, and £0.25 a task, with no paid retry and no automatic paid
+fallback. A missing billing policy still refuses paid dispatch. Grok and
+Antigravity fail closed when a policy is loaded, because no subscription
+probe is implemented, and a subscription task can still start when no policy
+file is loaded. The OpenRouter worker remains one request and does not
+depend on the Claude binary. `ask` takes `--task-class`. Paid tasks need
+`task_class`. Current routing detail is `docs/MODEL-ROUTING.md`.
 
 ## codex (GPT-5-class, own harness)
 
@@ -252,7 +261,9 @@ is not. The OpenRouter worker remains one request.
   minimal diff that stayed inside the owned files. Probation for code-feature.
 - 2026-10-09 — code-feature (antigravity nudge hook, run rules-owner-followups): FAILED (Ringer timeout). The worker generated no files after 40 minutes, likely hanging on generation under `reasoning-effort high`, so I terminated it and reassigned the task.
 
-## claude opus (Claude Code CLI 2.1.293, claude.ai subscription, bwrap on Linux)
+## claude opus, historical (Claude Code CLI 2.1.293, recorded while a claude.ai subscription existed)
+
+Claude is unsupported. The rows under this heading are evidence from those dates. Do not select `engine` `claude`.
 
 - 2026-10-16 — code-feature x2 (example-site-build, medium): 2/2 PASS on attempt 1 in parallel isolated snapshots (`backend-api` 392.1s, 16 new Python tests + 93 total pass; `frontend-ui` 127.7s, QML/JS view updates plus 50 JS state/logic assertions and `qmlformat`). Both workers stayed strictly inside their declared file ownership.
 
@@ -369,6 +380,8 @@ is not. The OpenRouter worker remains one request.
 - 2026-07-09 (aicred-invoice-downloads, 4 code-fix tasks + 1 follow-up, worktrees+npm ci checks): systematic attempt-1 NO-OP — all 4 parallel workers produced zero edits and no summary on first attempt, then completed cleanly on attempt 2 after retry-prompt injection (34k-69k tokens each). Follow-up single task passed attempt 1. Suspect first-invocation session warm-up in opencode-sandboxed under parallel spawn; budget for 2 attempts on parallel GLM batches. Output quality on Next.js/Stripe route+test work: solid, spec-faithful, one boss-caught design gap (used user-scoped supabase client where RLS demanded service role — spec didn't say explicitly; say it explicitly).
 
 ## opencode (harness note, any model)
+
+Paid admission refuses `engine` `opencode` now. The note below records a 28 July 2026 failure.
 - 2026-07-28 (code-review, pr82-token-saver-review): GLM 5.2 produced a complete, high-quality 218-line report but could NOT write it to an output directory created by the parent Claude Code process — every write returned EPERM. It then spent ~3000s burning retries on ctypes/`openat`/AppleScript/`sandbox-exec` workarounds until it timed out, and the task logged as FAIL despite the deliverable existing in its taskdir. Codex workers in the same run were unaffected. Lesson: point opencode workers' output INSIDE their own taskdir and harvest via `expect_files`; never hand them a shared output dir another process created. This is an orchestrator spec bug, not a model failure — do not read the FAIL as evidence against GLM.
 
 ## Process lessons (2026-07-28, PR #82 review)
@@ -376,7 +389,9 @@ is not. The OpenRouter worker remains one request.
 - **Doc-stated support floors need a CI job or they are fiction.** README promised Python 3.11+ while CI only ever ran 3.12; a 3.12-only f-string reached review with a fully green suite. Either test the floor or move it.
 
 
-### 2026-10-16 — Hermes software-work native comparison
+### 2026-10-16 Hermes notes, historical
+
+Hermes is retired. It is not an engine. The rows under this heading record that day's runs.
 
 One source-identical case, not a model promotion: xai-oauth/grok-4.3 high returned a generic rebase plan despite current upstream code removing the PR’s polling design; structural PASS was rejected by coordinator semantic review. The already-configured primary/review model xai-oauth/grok-4.7 high, on the identical input fingerprint, identified the removed polling and returned a sourced no_action judgment. Native one-call/tool-free guard receipts retained. Use the current primary/review route for this on-demand judgment rather than inheriting a background-job model. No provider fallback or global model policy change.
 

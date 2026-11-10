@@ -1,6 +1,8 @@
 # Ringer Live Artifacts — Design Plan
 
-**Author:** aicred (Claude, MBP) — 2026-07-04, written during the aicred baseline-repair double swarm
+Historical plan from 4 July 2026. Claude is unsupported on this fork, and Hermes is retired. Current routing is `docs/MODEL-ROUTING.md`. The notes below record that day's plan.
+
+**Author:** aicred (Claude, MBP), 4 July 2026, written during the aicred baseline-repair double swarm
 **For:** Jon → Ringer repo (github.com/NateBJones-Projects/ringer, Lex maintains)
 **Goal:** live, shareable visual status/review pages from Ringer runs with ZERO Anthropic tokens.
 Reserve Fable/Claude for what it's uniquely good at (triage judgment, adversarial verification,

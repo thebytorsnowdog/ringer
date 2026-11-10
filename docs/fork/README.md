@@ -14,6 +14,8 @@ and stays level with it.
 
 `ian` is never rewritten, so every clone of it fast-forwards.
 
+Claude is unsupported on `ian`. Hermes is retired. Paid OpenRouter dispatch uses `engine` `openrouter` and the shortlist in `docs/DELEGATION-MATRIX.md`. Rows below that name Claude or OpenCode describe older branch contents.
+
 | Topic branch | Adds | Upstream |
 | --- | --- | --- |
 | `feat/fork-setup` | This guide, the README notes, `scripts/fork/update-ian.sh`, the weekly workflow | Fork only |
@@ -27,8 +29,8 @@ and stays level with it.
 | `feat/pstack-ringer-defaults` | `pstack-ringer-defaults` skill, the single source that harness skill dirs symlink to | Fork only |
 | `feat/subscription-routing` | Subscription-first routing, bound model-fit assessment, `scripts/assess_openrouter.py` | Fork only |
 | `feat/host-neutral-coordinator` | Any host coordinates (Antigravity by default); Codex is a worker only | Fork only |
-| `feat/engine-effort-flag` | Optional engine `effort_flag` so CLIs like Claude Code (`--effort`) pass the model-fit gate | Candidate PR |
-| `feat/subscription-workers` | Model notes for the Claude and Grok subscription workers; check-timeout lesson | Fork only |
+| `feat/engine-effort-flag` | Optional engine `effort_flag`. The branch notes mention Claude Code `--effort`. Claude is unsupported on `ian`. | Candidate PR |
+| `feat/subscription-workers` | Historical model notes for a Claude worker and the Grok worker; check-timeout lesson. Claude is unsupported now. | Fork only |
 | `feat/antigravity-nudge` | Antigravity PreInvocation hook to route inline work through Ringer | Fork only |
 
 ## Staying level with upstream

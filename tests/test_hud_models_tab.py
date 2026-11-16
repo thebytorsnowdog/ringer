@@ -7,12 +7,18 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import ringer  # noqa: E402
 from ringer import MODEL_SCOREBOARD_COLUMNS, PersistentHudServer  # noqa: E402
+
+
+def api_request(state_dir: Path, url: str, **kwargs: object) -> Request:
+    """/api/* needs the token the HUD wrote to its state dir at launch."""
+    return Request(url, headers={ringer.HUD_TOKEN_HEADER: ringer.read_hud_token(state_dir)}, **kwargs)
 
 
 def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
@@ -82,7 +88,7 @@ class HudModelsTabTests(unittest.TestCase):
         )
         _server, port = self.start_server()
 
-        with urlopen(f"http://127.0.0.1:{port}/api/models", timeout=5) as response:
+        with urlopen(api_request(self.state_dir, f"http://127.0.0.1:{port}/api/models"), timeout=5) as response:
             self.assertEqual(200, response.status)
             self.assertEqual("application/json; charset=utf-8", response.headers["Content-Type"])
             payload = json.loads(response.read().decode("utf-8"))
@@ -115,7 +121,7 @@ class HudModelsTabTests(unittest.TestCase):
         default_db = Path(os.environ["RINGER_HOME"]) / "ringer.db"
         _server, port = self.start_server(use_db=False)
 
-        with urlopen(f"http://127.0.0.1:{port}/api/models", timeout=5) as response:
+        with urlopen(api_request(self.state_dir, f"http://127.0.0.1:{port}/api/models"), timeout=5) as response:
             self.assertEqual(200, response.status)
             payload = json.loads(response.read().decode("utf-8"))
 
@@ -131,7 +137,7 @@ class HudModelsTabTests(unittest.TestCase):
         self.log_path = bad_parent / "models.jsonl"
         _server, port = self.start_server()
 
-        with urlopen(f"http://127.0.0.1:{port}/api/models", timeout=5) as response:
+        with urlopen(api_request(self.state_dir, f"http://127.0.0.1:{port}/api/models"), timeout=5) as response:
             self.assertEqual(200, response.status)
             payload = json.loads(response.read().decode("utf-8"))
 
@@ -162,7 +168,7 @@ class HudModelsTabTests(unittest.TestCase):
             self.assertIn("/api/models", response.read().decode("utf-8"))
         for column in MODEL_SCOREBOARD_COLUMNS:
             self.assertIn(f">{column}<", page)
-        with urlopen(f"http://127.0.0.1:{port}/api/models", timeout=5) as response:
+        with urlopen(api_request(self.state_dir, f"http://127.0.0.1:{port}/api/models"), timeout=5) as response:
             self.assertEqual(200, response.status)
 
 

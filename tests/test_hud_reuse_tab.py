@@ -19,7 +19,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -64,7 +64,7 @@ class HudReuseTabTests(unittest.TestCase):
     def test_alive_recent_viewer_reuses_tab_and_prints_one_line(self) -> None:
         self.run_hud()
         self.opener.assert_not_called()
-        self.lookup.assert_called_once_with(8700)
+        self.lookup.assert_called_once_with(8700, state_dir=self.config.state_dir)
         self.assertEqual(
             "Ringside is already open in a browser tab: http://127.0.0.1:8700 "
             "(not opening another; use --force-open to open one anyway)\n",
@@ -120,7 +120,7 @@ class HudReuseTabTests(unittest.TestCase):
             with contextlib.redirect_stdout(self.output):
                 ringer.ensure_hud_running(self.config, open_browser=True)
         self.popen.assert_called_once()
-        self.lookup.assert_called_once_with(8700)
+        self.lookup.assert_called_once_with(8700, state_dir=self.config.state_dir)
         self.opener.assert_not_called()
 
     def test_ensure_fresh_hud_lookup_failure_opens_once(self) -> None:
@@ -171,21 +171,26 @@ class HudViewerServerTests(unittest.TestCase):
                 port = server.start()
             try:
                 base = f"http://127.0.0.1:{port}"
-                with urlopen(f"{base}/api/viewer-status", timeout=5) as response:
+                state_dir = Path(temp)
+                headers = {ringer.HUD_TOKEN_HEADER: server.token}
+                with urlopen(Request(f"{base}/api/viewer-status", headers=headers), timeout=5) as response:
                     self.assertEqual(200, response.status)
                     self.assertEqual("no-store", response.headers["Cache-Control"])
                     self.assertEqual({"seconds_since_viewer": None}, json.load(response))
-                self.assertIsNone(ringer.hud_viewer_seconds_since_ping(port))
-                with urlopen(f"{base}/api/viewer-ping", timeout=5) as response:
+                self.assertIsNone(ringer.hud_viewer_seconds_since_ping(port, state_dir=state_dir))
+                with urlopen(Request(f"{base}/api/viewer-ping", headers=headers), timeout=5) as response:
                     self.assertEqual(204, response.status)
                     self.assertEqual("no-store", response.headers["Cache-Control"])
                     self.assertEqual(b"", response.read())
-                with urlopen(f"{base}/api/viewer-status", timeout=5) as response:
+                with urlopen(Request(f"{base}/api/viewer-status", headers=headers), timeout=5) as response:
                     seconds = json.load(response)["seconds_since_viewer"]
                 self.assertIsInstance(seconds, float)
                 self.assertGreaterEqual(seconds, 0)
                 self.assertLess(seconds, 5)
-                self.assertTrue(ringer.hud_has_recent_viewer(port))
+                self.assertTrue(ringer.hud_has_recent_viewer(port, state_dir=state_dir))
+                # Without the token file the CLI sees a live HUD but no viewer data.
+                self.assertTrue(ringer.hud_is_alive(port))
+                self.assertFalse(ringer.hud_has_recent_viewer(port))
             finally:
                 server.stop()
 

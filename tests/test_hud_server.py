@@ -9,13 +9,18 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import ringer  # noqa: E402
 from ringer import PersistentHudServer, WORKER_LOG_TAIL_BYTES  # noqa: E402
+
+
+def api_request(state_dir: Path, url: str, **kwargs: object) -> Request:
+    """/api/* needs the token the HUD wrote to its state dir at launch."""
+    return Request(url, headers={ringer.HUD_TOKEN_HEADER: ringer.read_hud_token(state_dir)}, **kwargs)
 
 
 class PersistentHudServerTests(unittest.TestCase):
@@ -129,7 +134,7 @@ class PersistentHudServerTests(unittest.TestCase):
             self.assertEqual("text/html; charset=utf-8", response.headers["Content-Type"])
             self.assertIn("stub ringside page", response.read().decode("utf-8"))
 
-        with urlopen(f"{base}/api/runs", timeout=5) as response:
+        with urlopen(api_request(self.state_dir, f"{base}/api/runs"), timeout=5) as response:
             self.assertEqual(200, response.status)
             self.assertEqual("application/json; charset=utf-8", response.headers["Content-Type"])
             self.assertEqual("no-store", response.headers["Cache-Control"])
@@ -137,7 +142,7 @@ class PersistentHudServerTests(unittest.TestCase):
         self.assertEqual(["live-run", "finished-run"], [item["run_id"] for item in runs_body["runs"]])
         self.assertEqual(os.getpid(), runs_body["active"]["live-run"]["pid"])
 
-        with urlopen(f"{base}/api/library", timeout=5) as response:
+        with urlopen(api_request(self.state_dir, f"{base}/api/library"), timeout=5) as response:
             self.assertEqual(200, response.status)
             self.assertEqual("no-store", response.headers["Cache-Control"])
             library_body = json.loads(response.read().decode("utf-8"))

@@ -22,7 +22,7 @@ Honestly: we never asked for contributions, and the number of people showing up 
 
 We *want* people shipping alternative Ringside faces. The rules that make a UI PR mergeable:
 
-- **Honest data.** Build against the real `/api/runs`, `/api/library`, `/api/models` responses — capture them as test fixtures and test your rendering against the fixtures. The display contract (columns, identity taxonomy) is non-negotiable.
+- **Honest data.** Build against the real `/api/runs`, `/api/library`, `/api/models` responses — capture them as test fixtures and test your rendering against the fixtures. Ringside only answers `Host: 127.0.0.1:<port>` or `localhost:<port>`, and `/api/*` needs the `X-Ringer-Token` header; each launch writes its token to `<state_dir>/hud.token` (owner-only), for example `curl -H "X-Ringer-Token: $(cat ~/.ringer/hud.token)" http://127.0.0.1:8700/api/runs`. `/api/open-folder` is a POST from the page or native origin. The display contract (columns, identity taxonomy) is non-negotiable.
 - **Self-contained.** No CDNs, no external fonts, no phoning out. Ringside is a local tool; vendor everything.
 - **Escaped.** Run names and worker output are untrusted text.
 - **Opt-in, not takeover.** The stock UI stays default; alternates arrive through an explicit selection mechanism, never by file presence. (If the selection mechanism doesn't exist yet when you read this, a small PR adding it is the ideal first piece — see #39's thread.)

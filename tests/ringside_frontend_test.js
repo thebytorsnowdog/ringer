@@ -8,7 +8,7 @@ const source = fs.readFileSync(
   "utf8",
 );
 
-function environment(payload, native = false) {
+function environment(payload, native = false, token = "") {
   class Element {
     constructor() {
       this.innerHTML = "";
@@ -54,7 +54,8 @@ function environment(payload, native = false) {
   const elements = new Map(),
     docEvents = {},
     timers = [],
-    calls = [];
+    calls = [],
+    requests = [];
   const el = (id) => {
     if (!elements.has(id)) elements.set(id, new Element());
     return elements.get(id);
@@ -66,7 +67,12 @@ function environment(payload, native = false) {
   });
   const document = {
     getElementById: el,
-    querySelector: (selector) => el(selector),
+    querySelector: (selector) =>
+      selector === 'meta[name="ringer-token"]'
+        ? native || !token
+          ? null
+          : { content: token }
+        : el(selector),
     querySelectorAll: () => views,
     addEventListener: (name, fn) => {
       docEvents[name] = fn;
@@ -78,6 +84,7 @@ function environment(payload, native = false) {
     ? {
         ringsideNative: {
           serverURL: Promise.resolve("http://127.0.0.1:9876"),
+          ...(token ? { serverToken: Promise.resolve(token) } : {}),
           readLibrary: async () => JSON.stringify(payload["/api/library"]),
           readArtifact: async () => "native preview",
           artifactURL: () => "http://asset.localhost/preview",
@@ -98,8 +105,9 @@ function environment(payload, native = false) {
       URL,
       localStorage: { getItem: () => null, setItem() {} },
       setInterval: (fn, ms) => timers.push({ fn, ms }),
-      fetch: async (url) => {
+      fetch: async (url, init = {}) => {
         calls.push(url);
+        requests.push({ url: String(url), init });
         const resource = String(url).replace(/^http:\/\/127\.0\.0\.1:9876/, "");
         const value = payload[resource];
         if (value instanceof Error) throw value;
@@ -121,6 +129,7 @@ function environment(payload, native = false) {
     el,
     timers,
     calls,
+    requests,
     click: (dataset) =>
       docEvents.click({ target: { closest: () => ({ dataset }) } }),
     input: (id, value) => el(id).events.input({ target: { value } }),
@@ -323,8 +332,27 @@ const data = {
   await settle();
   assert.match(empty.el("run-picker").innerHTML, /No runs yet/);
   assert.equal(empty.el("open-folder").disabled, true);
+  const tokenOf = (request) => request.init.headers?.["X-Ringer-Token"];
+  assert.ok(empty.requests.every((request) => tokenOf(request) === undefined));
+  data["/api/open-folder"] = "";
+  for (const [label, client] of [
+    ["page", environment(data, false, "page-token")],
+    ["native", environment(data, true, "native-token")],
+  ]) {
+    await settle();
+    const expected = `${label}-token`;
+    const api = client.requests.filter((r) => /\/api\//.test(r.url));
+    assert.ok(api.length > 0, label);
+    assert.ok(api.every((r) => tokenOf(r) === expected), label);
+    client.click({ output: "Release" });
+    await settle();
+    await client.el("open-folder").onclick();
+    const open = client.requests.find((r) => r.url.includes("/api/open-folder"));
+    assert.equal(open?.init.method, "POST", label);
+    assert.equal(tokenOf(open), expected, label);
+  }
   console.log(
-    "PASS: retry evidence, escaping, task search, raw logs, model filtering, dead workers, saved versions, reconnect, native compact/expand, empty states",
+    "PASS: retry evidence, escaping, task search, raw logs, model filtering, dead workers, saved versions, reconnect, native compact/expand, empty states, HUD token and POST open-folder",
   );
 })().catch((error) => {
   console.error(error);

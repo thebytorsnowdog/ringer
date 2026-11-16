@@ -54,13 +54,18 @@ jobs:
   hud:
     # Compiles the Ringside shell so Rust and Cargo.lock changes get checked on
     # pull requests, not only when a release tag is pushed.
-    name: hud cargo check
-    runs-on: ubuntu-latest
+    name: hud cargo check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev

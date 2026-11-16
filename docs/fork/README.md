@@ -38,9 +38,19 @@ Claude is unsupported on `ian`. Hermes is retired. Paid OpenRouter dispatch uses
 The `fork sync` workflow runs every Monday (and on demand from the Actions
 tab). It runs `scripts/fork/update-ian.sh`, which:
 
-1. fast-forwards `main` to upstream;
-2. merges upstream `main` and every `feat/*` branch into `ian`;
-3. runs the test suite, and pushes `main` and `ian` only if everything passed.
+1. merges upstream `main` and every `feat/*` branch onto `ian`;
+2. runs the test suite.
+
+That job has a read-only token, because it runs upstream's code. A second job,
+which runs only git and gh, then calls `scripts/fork/publish-sync.sh`:
+
+3. fast-forwards `main` to upstream;
+4. pushes the result to a `fork-sync/<date>-<sha>` branch and opens a PR into
+   `ian`, closing any older fork-sync PR, and starts the tests on it.
+
+`ian` is protected and never pushed directly. Review the PR and merge it with
+**Create a merge commit** (not squash), so upstream history and README
+contributor credit survive.
 
 If a merge conflicts, the suite fails, or upstream changed a workflow file
 (the Actions token cannot push those), the workflow opens a "Fork sync failed"
@@ -49,7 +59,7 @@ issue. Finish the update locally:
 ```sh
 git switch ian && git pull --ff-only
 git merge upstream/main          # resolve any conflict here, once
-scripts/fork/update-ian.sh       # merges the feat/* branches, tests, pushes
+scripts/fork/update-ian.sh       # merges the feat/* branches, tests, opens the PR
 ```
 
 `git config rerere.enabled true` lets Git replay a resolution it has seen.

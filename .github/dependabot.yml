@@ -1,12 +1,17 @@
 version: 2
+# No target-branch: ian is the default branch already, and setting it would
+# stop these settings (including the ignore below) applying to security updates.
 updates:
   - package-ecosystem: github-actions
     directory: /
-    target-branch: ian
     schedule:
       interval: weekly
   - package-ecosystem: cargo
     directory: /hud
-    target-branch: ian
     schedule:
       interval: weekly
+    ignore:
+      # glib 0.18 comes from Tauri/wry's GTK3 stack on Linux. RUSTSEC-2024-0429
+      # has no fix that Tauri accepts, so every security update attempt fails.
+      # Drop this once Tauri moves off glib 0.18.
+      - dependency-name: glib

@@ -1,51 +1,97 @@
 name: fork sync
 
-# Weekly: fast-forward main to upstream, merge main and every feat/* branch
-# into ian, run the suite, and push only if all of that succeeds. On failure
+# Weekly: merge upstream main and every feat/* branch onto ian and run the
+# suite with a read-only token, then open a PR into ian from a separate job
+# that runs no repository-merged code. ian is never pushed directly. On failure
 # it opens an issue instead. Fork-only; see docs/fork/README.md.
 on:
   schedule:
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  issues: write
+permissions: {}
 
 concurrency:
   group: fork-sync
   cancel-in-progress: false
 
 jobs:
-  update-ian:
+  prepare:
+    # Upstream code runs here (the suite), so this job can only read.
     if: github.repository == 'thebytorsnowdog/ringer'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ian
           # test_contributors.py audits full git history
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Update ian
+      - name: Merge and test
         run: |
           # Merge commits are credited to the fork's maintainer (README Contributors).
           git config user.name Snowy
           git config user.email 215750096+thebytorsnowdog@users.noreply.github.com
-          scripts/fork/update-ian.sh
-      - name: Report failure
-        if: failure()
+          scripts/fork/update-ian.sh --bundle "$RUNNER_TEMP/fork-sync.bundle"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fork-sync-bundle
+          path: ${{ runner.temp }}/fork-sync.bundle
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    # Write access, but only git and gh run here, from ian's own checkout.
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ian
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fork-sync-bundle
+          path: ${{ runner.temp }}
+      - name: Open the update PR
         env:
           GH_TOKEN: ${{ github.token }}
-          # update-ian.sh adds an 'upstream' remote, which gh would otherwise target.
+          GH_REPO: ${{ github.repository }}
+          # PRs opened with the Actions token do not start pull_request runs.
+          FORK_SYNC_DISPATCH_TESTS: "1"
+        run: |
+          # git pushes through gh's credential helper; nothing is left in .git/config.
+          gh auth setup-git
+          git fetch --quiet "$RUNNER_TEMP/fork-sync.bundle" \
+            refs/fork-sync/ian:refs/fork-sync/ian refs/fork-sync/main:refs/fork-sync/main
+          scripts/fork/publish-sync.sh refs/fork-sync/ian refs/fork-sync/main
+
+  report:
+    needs: [prepare, publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Report failure
+        env:
+          GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           title="Fork sync failed"
           body="The weekly update of ian failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-          Common causes: a feat/* branch conflicts with upstream, the suite fails, or upstream changed a workflow file (the Actions token cannot push those). Run scripts/fork/update-ian.sh on a local clone to finish the update."
+          Common causes: a feat/* branch conflicts with upstream, the suite fails, or upstream changed a workflow file (the Actions token cannot push those). Run scripts/fork/update-ian.sh on a local clone to finish the update; it opens the PR into ian."
           existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"

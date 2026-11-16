@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, ian]
   pull_request:
+  # fork-sync dispatches this on its PR branch: PRs opened with the Actions
+  # token do not trigger pull_request runs.
+  workflow_dispatch:
 
 permissions:
   contents: read

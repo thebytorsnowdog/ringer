@@ -6,6 +6,7 @@
   let listener = null;
   window.ringsideNative = {
     serverURL: invoke("hud_server_url"),
+    serverToken: invoke("hud_server_token").catch(() => ""),
     readLibrary: () => invoke("read_artifact_library"),
     readArtifact: (path) => invoke("read_artifact_html", { path }),
     artifactURL: (path) => tauri.core.convertFileSrc(path),

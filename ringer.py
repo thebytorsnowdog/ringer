@@ -6,10 +6,12 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
 import re
+import secrets
 import shlex
 import signal
 import shutil
@@ -31,6 +33,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -5723,7 +5726,7 @@ def send_response_body(
     handler.send_header("Content-Type", content_type)
     # The native webview reads only this local HUD. Never expose it to arbitrary sites.
     origin = handler.headers.get("Origin", "")
-    if origin in {"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"}:
+    if origin in NATIVE_HUD_ORIGINS:
         handler.send_header("Access-Control-Allow-Origin", origin)
         handler.send_header("Vary", "Origin")
     if no_store:
@@ -5742,6 +5745,63 @@ def send_json_response(handler: BaseHTTPRequestHandler, data: dict[str, Any]) ->
         content_type="application/json; charset=utf-8",
         no_store=True,
     )
+
+
+# The HUD listens on a fixed loopback port, so any web page can aim requests at
+# it and DNS rebinding can make those requests same-origin. Three guards close
+# that: only loopback Host headers are served, /api/* needs this launch's token,
+# and the one side effect (open-folder) is a POST from a known Origin.
+HUD_TOKEN_HEADER = "X-Ringer-Token"
+HUD_TOKEN_FILE_NAME = "hud.token"
+NATIVE_HUD_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"})
+
+
+def hud_token_path(state_dir: Path) -> Path:
+    return state_dir / HUD_TOKEN_FILE_NAME
+
+
+def write_hud_token(state_dir: Path, token: str) -> None:
+    """Leave this launch's token where the CLI and the native shell can read it (owner-only)."""
+    path = hud_token_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token)
+    os.replace(temp_path, path)
+
+
+def read_hud_token(state_dir: Path | None) -> str:
+    if state_dir is None:
+        return ""
+    try:
+        return hud_token_path(state_dir).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def loopback_host_allowed(handler: BaseHTTPRequestHandler, port: int | None) -> bool:
+    host = handler.headers.get("Host", "")
+    return port is not None and host in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+
+def hud_origin_allowed(handler: BaseHTTPRequestHandler, port: int | None) -> bool:
+    origin = handler.headers.get("Origin", "")
+    if origin in NATIVE_HUD_ORIGINS:
+        return True
+    return port is not None and origin in {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+
+
+def hud_token_matches(handler: BaseHTTPRequestHandler, token: str) -> bool:
+    supplied = handler.headers.get(HUD_TOKEN_HEADER, "")
+    return bool(token) and hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))
+
+
+def inject_hud_token_into_html(html: str, token: str) -> str:
+    meta = f'<meta name="ringer-token" content="{html_escape(token, quote=True)}" />'
+    if "<head>" in html:
+        return html.replace("<head>", f"<head>\n    {meta}", 1)
+    return meta + html
 
 
 def read_json_object(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -5887,16 +5947,80 @@ class PersistentHudServer:
         self.model_notes_path: Path | None = None
         self.update_status: dict[str, Any] | None = None
         self.last_viewer_ping: float | None = None
+        self.token: str = ""
 
     def start(self) -> int:
         state_dir = self.state_dir
         artifact_root = artifacts_dir(state_dir)
         preferred_port = self.preferred_port
         server_ref = self
+        token = secrets.token_urlsafe(32)
 
         class Handler(BaseHTTPRequestHandler):
+            def request_allowed(self, path: str) -> bool:
+                if not loopback_host_allowed(self, server_ref.port):
+                    self.send_error(HTTPStatus.FORBIDDEN, "unexpected Host header")
+                    return False
+                if path.startswith("/api/") and not hud_token_matches(self, server_ref.token):
+                    self.send_error(HTTPStatus.UNAUTHORIZED, "missing or wrong HUD token")
+                    return False
+                return True
+
+            def do_OPTIONS(self) -> None:  # noqa: N802
+                # CORS preflight for the native shell's token header and POST.
+                origin = self.headers.get("Origin", "")
+                if not loopback_host_allowed(self, server_ref.port) or origin not in NATIVE_HUD_ORIGINS:
+                    self.send_error(HTTPStatus.FORBIDDEN)
+                    return
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Methods", "GET, POST")
+                self.send_header("Access-Control-Allow-Headers", HUD_TOKEN_HEADER)
+                self.send_header("Access-Control-Max-Age", "600")
+                self.send_header("Vary", "Origin")
+                self.end_headers()
+
+            def do_POST(self) -> None:  # noqa: N802
+                parsed = urllib.parse.urlparse(self.path)
+                if not loopback_host_allowed(self, server_ref.port):
+                    self.send_error(HTTPStatus.FORBIDDEN, "unexpected Host header")
+                    return
+                if parsed.path != "/api/open-folder":
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                if not hud_origin_allowed(self, server_ref.port):
+                    self.send_error(HTTPStatus.FORBIDDEN, "unexpected Origin")
+                    return
+                if not self.request_allowed(parsed.path):
+                    return
+                self.open_folder(parsed.query)
+
+            def open_folder(self, query: str) -> None:
+                params = urllib.parse.parse_qs(query)
+                run_id = (params.get("run") or [""])[0]
+                artifact_root_dir = (state_dir / "artifacts").resolve()
+                target = artifact_root_dir / "deliverables"
+                if run_id:
+                    target = target / sanitize_artifact_name(run_id)
+                if not target.exists():
+                    target = artifact_root_dir
+                try:
+                    resolved = target.resolve()
+                    if resolved != artifact_root_dir and artifact_root_dir not in resolved.parents:
+                        self.send_error(HTTPStatus.NOT_FOUND)
+                        return
+                    if sys.platform == "darwin":
+                        subprocess.Popen(["open", str(resolved)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        send_response_body(self, HTTPStatus.NO_CONTENT, b"", content_type="text/plain; charset=utf-8", no_store=True)
+                    else:
+                        self.send_error(HTTPStatus.NOT_IMPLEMENTED)
+                except Exception:
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
+
             def do_GET(self) -> None:  # noqa: N802
                 path = urllib.parse.urlparse(self.path).path
+                if not self.request_allowed(path):
+                    return
                 if path == "/api/viewer-ping":
                     server_ref.last_viewer_ping = time.monotonic()
                     self.send_response(HTTPStatus.NO_CONTENT)
@@ -5910,7 +6034,7 @@ class PersistentHudServer:
                     })
                     return
                 if path == "/":
-                    body = read_ringside_html().encode("utf-8")
+                    body = inject_hud_token_into_html(read_ringside_html(), server_ref.token).encode("utf-8")
                     send_response_body(
                         self,
                         HTTPStatus.OK,
@@ -5964,28 +6088,8 @@ class PersistentHudServer:
                     send_json_response(self, payload)
                     return
                 if path == "/api/open-folder":
-                    query = urllib.parse.urlparse(self.path).query
-                    params = urllib.parse.parse_qs(query)
-                    name = (params.get("artifact") or [""])[0]
-                    run_id = (params.get("run") or [""])[0]
-                    artifact_root_dir = (state_dir / "artifacts").resolve()
-                    target = artifact_root_dir / "deliverables"
-                    if run_id:
-                        target = target / sanitize_artifact_name(run_id)
-                    if not target.exists():
-                        target = artifact_root_dir
-                    try:
-                        resolved = target.resolve()
-                        if resolved != artifact_root_dir and artifact_root_dir not in resolved.parents:
-                            self.send_error(HTTPStatus.NOT_FOUND)
-                            return
-                        if sys.platform == "darwin":
-                            subprocess.Popen(["open", str(resolved)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            send_response_body(self, HTTPStatus.NO_CONTENT, b"", content_type="text/plain; charset=utf-8", no_store=True)
-                        else:
-                            self.send_error(HTTPStatus.NOT_IMPLEMENTED)
-                    except Exception:
-                        self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
+                    # A side effect must not ride on a GET any page can fire blindly.
+                    self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
                     return
                 if path == "/api/library":
                     # A run that died without cleanup must not sit "live"
@@ -6035,6 +6139,10 @@ class PersistentHudServer:
                 "that port is already in use. Use --port to choose another port."
             ) from exc
         self.port = int(self.httpd.server_address[1])
+        # Written only after the bind succeeds, so a failed second launch
+        # cannot replace the token a running HUD is checking.
+        self.token = token
+        write_hud_token(state_dir, token)
         self.thread = threading.Thread(target=self.httpd.serve_forever, name="ringer-hud", daemon=True)
         self.thread.start()
         url = f"http://127.0.0.1:{self.port}"
@@ -6076,10 +6184,14 @@ class Dashboard:
     def start(self) -> int:
         state_path = self.state_path
         artifact_root = state_path.parent.parent / "artifacts"
+        dashboard_ref = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
                 path = urllib.parse.urlparse(self.path).path
+                if not loopback_host_allowed(self, dashboard_ref.port):
+                    self.send_error(HTTPStatus.FORBIDDEN, "unexpected Host header")
+                    return
                 if path == "/":
                     body = read_dashboard_html().encode("utf-8")
                     send_response_body(
@@ -12019,10 +12131,19 @@ async def run_manifest(
         unregister_active_run(runner.run_id)
 
 
-def hud_is_alive(port: int) -> bool:
+def hud_api_request(port: int, path: str, state_dir: Path | None) -> str | urllib.request.Request:
+    url = f"http://127.0.0.1:{port}{path}"
+    token = read_hud_token(state_dir)
+    return urllib.request.Request(url, headers={HUD_TOKEN_HEADER: token}) if token else url
+
+
+def hud_is_alive(port: int, *, state_dir: Path | None = None) -> bool:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/runs", timeout=0.4) as response:
+        with urllib.request.urlopen(hud_api_request(port, "/api/runs", state_dir), timeout=0.4) as response:
             return response.status == 200
+    except urllib.error.HTTPError as exc:
+        # A HUD that rejects our token is still running on the port.
+        return exc.code == HTTPStatus.UNAUTHORIZED
     except Exception:
         return False
 
@@ -12137,20 +12258,20 @@ def start_hud_update_maintenance(
         return None
 
 
-def hud_viewer_seconds_since_ping(port: int) -> float | None:
+def hud_viewer_seconds_since_ping(port: int, *, state_dir: Path | None = None) -> float | None:
     """Read the viewer heartbeat, allowing older HUDs to fail the lookup."""
-    url = f"http://127.0.0.1:{port}/api/viewer-status"
-    with urllib.request.urlopen(url, timeout=1) as response:
+    request = hud_api_request(port, "/api/viewer-status", state_dir)
+    with urllib.request.urlopen(request, timeout=1) as response:
         value = json.load(response).get("seconds_since_viewer")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     return None
 
 
-def hud_has_recent_viewer(port: int) -> bool:
+def hud_has_recent_viewer(port: int, *, state_dir: Path | None = None) -> bool:
     """A missing or failed heartbeat lookup should still allow a browser open."""
     try:
-        seconds = hud_viewer_seconds_since_ping(port)
+        seconds = hud_viewer_seconds_since_ping(port, state_dir=state_dir)
         return seconds is not None and 0 <= seconds < 15
     except Exception:
         return False
@@ -12164,7 +12285,8 @@ def ensure_hud_running(config: AppConfig, *, open_browser: bool) -> None:
     """
     port = config.hud_port
     url = f"http://127.0.0.1:{port}"
-    already_alive = hud_is_alive(port)
+    state_dir = config.state_dir
+    already_alive = hud_is_alive(port, state_dir=state_dir)
     if not already_alive:
         log_path = config.state_dir / "hud.log"
         with contextlib.suppress(Exception):
@@ -12178,11 +12300,11 @@ def ensure_hud_running(config: AppConfig, *, open_browser: bool) -> None:
                     start_new_session=True,
                 )
         for _ in range(20):
-            if hud_is_alive(port):
+            if hud_is_alive(port, state_dir=state_dir):
                 break
             time.sleep(0.15)
-    if open_browser and not already_alive and hud_is_alive(port):
-        if not (config.reuse_open_tab and hud_has_recent_viewer(port)):
+    if open_browser and not already_alive and hud_is_alive(port, state_dir=state_dir):
+        if not (config.reuse_open_tab and hud_has_recent_viewer(port, state_dir=state_dir)):
             open_in_browser(url)
     print(f"Ringside: {url}", flush=True)
 
@@ -12191,9 +12313,11 @@ def run_persistent_hud(
     config: AppConfig, *, port: int | None, open_viewer: bool, force_open: bool = False,
 ) -> int:
     chosen_port = port if port is not None else config.hud_port
-    if hud_is_alive(chosen_port):
+    if hud_is_alive(chosen_port, state_dir=config.state_dir):
         url = f"http://127.0.0.1:{chosen_port}"
-        if open_viewer and not force_open and config.reuse_open_tab and hud_has_recent_viewer(chosen_port):
+        if open_viewer and not force_open and config.reuse_open_tab and hud_has_recent_viewer(
+            chosen_port, state_dir=config.state_dir
+        ):
             print(
                 f"Ringside is already open in a browser tab: {url} "
                 "(not opening another; use --force-open to open one anyway)"

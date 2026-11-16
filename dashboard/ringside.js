@@ -23,6 +23,20 @@
     return null;
   };
   const bridge = window.ringsideNative;
+  // The HUD wants this launch's token on /api/*: the page gets it in a meta
+  // tag, the native shell reads the token file the HUD writes.
+  const hudToken = Promise.resolve(
+    bridge
+      ? bridge.serverToken
+      : document.querySelector('meta[name="ringer-token"]')?.content,
+  ).then(
+    (token) => token || "",
+    () => "",
+  );
+  async function apiHeaders(path) {
+    const token = path.startsWith("/api/") ? await hudToken : "";
+    return token ? { "X-Ringer-Token": token } : {};
+  }
   const state = {
     runs: [],
     artifacts: [],
@@ -635,7 +649,10 @@
     if (!path || !path.startsWith("/"))
       throw new Error("Invalid local resource");
     const base = bridge ? await bridge.serverURL : "";
-    const response = await fetch(base + path, { cache: "no-store" });
+    const response = await fetch(base + path, {
+      cache: "no-store",
+      headers: await apiHeaders(path),
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return type === "text" ? response.text() : response.json();
   }
@@ -852,6 +869,7 @@
       const base = bridge ? await bridge.serverURL : "";
       const response = await fetch(
         `${base}/api/open-folder?artifact=${encodeURIComponent(a.name)}&run=${encodeURIComponent(v?.run_id || a.current_run_id || "")}`,
+        { method: "POST", headers: await apiHeaders("/api/open-folder") },
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       $("library-error").hidden = true;

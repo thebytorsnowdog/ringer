@@ -69,6 +69,14 @@ fn hud_server_url() -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+/// This launch's HUD API token, which `ringer.py hud` writes next to its state.
+#[tauri::command]
+fn hud_server_token() -> String {
+    fs::read_to_string(load_state_dir().join("hud.token"))
+        .map(|token| token.trim().to_string())
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 fn toggle_collapse<R: Runtime>(
     window: WebviewWindow<R>,
@@ -223,6 +231,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             hide_window,
             hud_server_url,
+            hud_server_token,
             toggle_collapse,
             resize_main_window,
             read_artifact_library,

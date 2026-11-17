@@ -57,8 +57,9 @@ contributor credit survive.
 
 Conflicts in those two workflow files are resolved by keeping this fork's
 versions; useful upstream edits to them need to be ported by hand. If a merge
-conflicts in any other file, or the suite fails, the workflow opens a "Fork
-sync failed" issue. Finish the update locally:
+conflicts in any other file, the suite fails, or the publish step cannot push
+a workflow-file change (the Actions token cannot push those), the workflow
+opens a "Fork sync failed" issue. Finish the update locally:
 
 ```sh
 git switch ian && git pull --ff-only

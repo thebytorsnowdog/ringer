@@ -56,8 +56,6 @@ jobs:
       contents: write
       pull-requests: write
       actions: write
-      # So the publish push is allowed when the restore commit touches workflows.
-      workflows: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,7 +94,7 @@ jobs:
           title="Fork sync failed"
           body="The weekly update of ian failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-          Common causes: a feat/* branch conflicts with upstream, or the suite fails. Run scripts/fork/update-ian.sh on a local clone to finish the update; it opens the PR into ian."
+          Common causes: a feat/* branch conflicts with upstream, the suite fails, or the publish step cannot push a workflow-file change (the Actions token cannot push those). Run scripts/fork/update-ian.sh on a local clone to finish the update; it opens the PR into ian."
           existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"

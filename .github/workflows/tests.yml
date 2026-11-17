@@ -13,15 +13,29 @@ permissions:
 
 jobs:
   suite:
-    name: full suite (${{ matrix.os }})
+    name: full suite (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # test_contributors.py audits full git history
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Run test suite
+        env:
+          RINGER_NO_SELF_UPDATE: "1"
+        run: python3 -m unittest discover -s tests -v
+
+  suite-macos:
     # macOS runners are often unavailable, which turns push runs on ian red.
-    # Keep the Ubuntu job on push and pull_request; its name is a required check.
-    if: github.event_name == 'pull_request' || matrix.os != 'macos-latest'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    # The Ubuntu job above still runs on push and pull_request; its name is a
+    # required check.
+    name: full suite (macos-latest)
+    if: github.event_name == 'pull_request'
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -39,22 +53,28 @@ jobs:
   hud:
     # Compiles the Ringside shell so Rust and Cargo.lock changes get checked on
     # pull requests, not only when a release tag is pushed.
-    name: hud cargo check (${{ matrix.os }})
-    if: github.event_name == 'pull_request' || matrix.os != 'macos-latest'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    name: hud cargo check (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Linux dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+      - name: Check the hud builds
+        working-directory: hud
+        run: cargo check --locked
+
+  hud-macos:
+    name: hud cargo check (macos-latest)
+    if: github.event_name == 'pull_request'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check the hud builds
         working-directory: hud
         run: cargo check --locked

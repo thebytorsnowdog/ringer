@@ -14,6 +14,9 @@ permissions:
 jobs:
   suite:
     name: full suite (${{ matrix.os }})
+    # macOS runners are often unavailable, which turns push runs on ian red.
+    # Keep the Ubuntu job on push and pull_request; its name is a required check.
+    if: github.event_name == 'pull_request' || matrix.os != 'macos-latest'
     strategy:
       fail-fast: false
       matrix:
@@ -33,31 +36,11 @@ jobs:
           RINGER_NO_SELF_UPDATE: "1"
         run: python3 -m unittest discover -s tests -v
 
-  windows:
-    # Non-blocking harness for native-Windows contributions (see PR #17).
-    # The suite is POSIX-only today; the job exists so Windows PRs carry
-    # executed proof on windows-latest. Flip to required once it's green.
-    name: windows harness (non-blocking)
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.12"
-      - name: Compile
-        run: python -m py_compile ringer.py
-      - name: Attempt test suite
-        env:
-          RINGER_NO_SELF_UPDATE: "1"
-        run: python -m unittest discover -s tests -v
-
   hud:
     # Compiles the Ringside shell so Rust and Cargo.lock changes get checked on
     # pull requests, not only when a release tag is pushed.
     name: hud cargo check (${{ matrix.os }})
+    if: github.event_name == 'pull_request' || matrix.os != 'macos-latest'
     strategy:
       fail-fast: false
       matrix:

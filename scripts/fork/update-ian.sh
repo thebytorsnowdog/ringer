@@ -53,14 +53,40 @@ else
 fi
 cd "$work"
 
-git merge --quiet --no-edit "$upstream/main"
-for branch in $(git for-each-ref --format='%(refname:short)' "refs/remotes/$origin/feat/"); do
-  if ! git merge --quiet --no-edit "$branch"; then
-    git merge --abort
-    echo "update-ian: merging $branch conflicts; merge it into a local ian checkout by hand" >&2
-    exit 1
+# This fork's tests.yml and release.yml drop the upstream Windows jobs and
+# run macOS checks only on pull_request. Restore them after every merge so a
+# weekly sync cannot put those jobs back. A conflict in any other file still
+# fails, as before.
+ian_base=$(git rev-parse HEAD)
+
+merge_keeping_ci() {
+  local ref=$1
+  if git merge --quiet --no-edit "$ref"; then
+    return 0
   fi
+  local conflicted other
+  conflicted=$(git diff --name-only --diff-filter=U)
+  other=$(printf '%s\n' "$conflicted" | grep -v -E '^\.github/workflows/(tests|release)\.yml$' || true)
+  if [ -z "$conflicted" ] || [ -n "$other" ]; then
+    git merge --abort
+    echo "update-ian: merging $ref conflicts; merge it into a local ian checkout by hand" >&2
+    return 1
+  fi
+  git checkout --ours -- .github/workflows/tests.yml .github/workflows/release.yml
+  git add -- .github/workflows/tests.yml .github/workflows/release.yml
+  git commit --quiet --no-edit
+}
+
+merge_keeping_ci "$upstream/main"
+for branch in $(git for-each-ref --format='%(refname:short)' "refs/remotes/$origin/feat/"); do
+  merge_keeping_ci "$branch"
 done
+
+# Take this fork's versions even when the merge auto-resolved to upstream's.
+git checkout "$ian_base" -- .github/workflows/tests.yml .github/workflows/release.yml
+if ! git diff --quiet HEAD -- .github/workflows/tests.yml .github/workflows/release.yml; then
+  git commit --quiet -m "Keep fork CI: no Windows jobs; macOS checks only on pull requests"
+fi
 
 if [ "$run_tests" = 1 ]; then
   RINGER_NO_SELF_UPDATE=1 python3 -m unittest discover -s tests

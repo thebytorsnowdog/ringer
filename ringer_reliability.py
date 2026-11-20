@@ -206,6 +206,7 @@ def check_subscription_quota_cap(
             if percent < 1.0:
                 continue
             resets_at = str(item.get("resetsAt") or "").strip()
+            suffix = ""
             if resets_at:
                 try:
                     reset_dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
@@ -213,11 +214,11 @@ def check_subscription_quota_cap(
                         reset_dt = reset_dt.replace(tzinfo=timezone.utc)
                     if reset_dt <= current:
                         continue
+                    suffix = f" (resets {reset_dt.isoformat()})"
                 except ValueError:
                     pass
             pct_display = int(round(percent * 100)) if percent <= 10.0 else int(round(percent))
-            suffix = f" (resets {resets_at})" if resets_at else ""
-            return True, f"{label} at {pct_display}%{suffix}"
+            return True, f"Subscription window at {pct_display}%{suffix}"
     return False, ""
 
 

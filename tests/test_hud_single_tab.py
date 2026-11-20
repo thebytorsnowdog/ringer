@@ -58,6 +58,7 @@ class HudSingleTabTests(unittest.TestCase):
 
     def test_dead_then_alive_opens_once_after_spawn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
+            hud_config = config(Path(temp))
             opened: list[str] = []
             spawned: list[object] = []
             alive_results = iter([False, True, True])
@@ -74,17 +75,18 @@ class HudSingleTabTests(unittest.TestCase):
 
                 def fake_popen(*args: object, **_kwargs: object) -> object:
                     spawned.append(args)
+                    ringer.write_hud_token(hud_config.state_dir, "d" * 43)
                     return object()
 
                 ringer.subprocess.Popen = fake_popen
-                ensure_hud_running(config(Path(temp)), open_browser=True)
+                ensure_hud_running(hud_config, open_browser=True)
             finally:
                 ringer.hud_is_alive = original_alive
                 ringer.hud_has_recent_viewer = original_viewer
                 ringer.open_in_browser = original_open
                 ringer.subprocess.Popen = original_popen
             self.assertEqual(1, len(spawned))
-            self.assertEqual(["http://127.0.0.1:8700"], opened)
+            self.assertEqual([(hud_config.state_dir / "browser-8700.html").as_uri()], opened)
 
 
 if __name__ == "__main__":

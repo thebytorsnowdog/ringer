@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ringer import PersistentHudServer  # noqa: E402
+from ringer import PersistentHudServer, write_dashboard_launcher  # noqa: E402
 
 
 def seed(root: Path) -> None:
@@ -83,7 +83,8 @@ def main() -> None:
         server.model_db_path = root / "fixture.db"
         server.model_notes_path = root / "no-notes.md"
         port = server.start()
-        print(f"Local test fixture only: http://127.0.0.1:{port}", flush=True)
+        launcher = write_dashboard_launcher(root, port, server.token)
+        print(f"Local test fixture launcher: {launcher.as_uri()}", flush=True)
         stop = threading.Event()
         def heartbeat() -> None:
             while not stop.wait(1):

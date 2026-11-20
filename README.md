@@ -110,8 +110,9 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 |---|---|
 | `key` | Task name — becomes the working subdirectory and the label everywhere |
 | `spec` | The prompt handed to the worker |
-| `check` | Shell command run after the worker exits; exit 0 = PASS |
-| `expect_files` | Files that must exist and be non-empty before the check runs |
+| `check` | Shell command run in a disposable verification workspace after the worker exits. Exit 0 passes the check. |
+| `check_read_paths` | Absolute paths to explicitly approved read-only inputs outside the task directory, such as the checker script and its fixtures. |
+| `expect_files` | Non-empty regular files required after the check. Relative paths stay inside the task directory. Absolute and `~/` entries explicitly approve those individual files for collection. |
 | `engine` | Which configured engine runs this task. With no `engine` and no `task_class`, the default is `codex`. With a `task_class` and no `engine`, the task is `auto` and `route_from_table()` chooses the engine from `registry/delegation-matrix.json`. |
 | `task_class` | `bounded-detail`, `coordination`, or `consequential`. Paid OpenRouter work requires `bounded-detail`. A missing class does not default to `bounded-detail`. `admit()` passes this value into the paid check. |
 | `model` | Exact model for this task, recorded in the bound assessment. A paid OpenRouter task names one shortlist id: `openrouter/z-ai/glm-5.3-flash` or `openrouter/deepseek/deepseek-v4.1-flash`. On `bounded-detail`, an explicit shortlist model may only confirm the cheapest one or name a cheaper or equal one. |
@@ -125,7 +126,9 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 | `full_access` | Worker runs unsandboxed — required for workers that spawn their own sub-workers; must also be enabled in config |
 | `worktrees` (run-level) | Give each task an isolated git worktree of `repo` so parallel workers can't collide |
 
-> **Worktree footgun:** on PASS the task's worktree is removed — including anything written inside it. In worktrees mode, worker logs live outside task worktrees in `workdir/logs/`; have workers write deliverables outside the worktree too, or have your `check` copy artifacts out before it exits 0.
+Checks use a fresh copy of the task directory and a minimal environment with networking disabled. Declare checker inputs in `check_read_paths`, install runtimes in the system tool directories or grant their paths explicitly, and direct build products into the verification workspace. Ringer publishes declared outputs created or updated by a passing check. On Linux, an absolute output can also be written by the check through a private copy of its output directory. On macOS, write check-generated outputs to task-relative paths. Linux requires bubblewrap and libseccomp. macOS requires Seatbelt through `sandbox-exec`. If the native sandbox cannot start, verification fails.
+
+On PASS, Ringer collects declared deliverables before removing a task worktree. Worker logs for worktree tasks live in `workdir/logs/`.
 
 Not sure what your tasks even are yet? [`docs/interview-prompt.md`](docs/interview-prompt.md) is a prompt you paste into any chatbot; it interviews you about the job and hands back a brief your orchestrating agent can turn into a manifest. Ready-made skeletons for the patterns that work live in [`templates/`](templates/).
 
@@ -296,10 +299,12 @@ Ringside is a local web page — no install, no account, nothing leaves your mac
 
 ```bash
 ./ringer.py run manifest.json   # starts Ringside and opens the tab for you
-./ringer.py hud                 # or open it any time → http://127.0.0.1:8700
+./ringer.py hud                 # opens the private dashboard on http://127.0.0.1:8700
 ```
 
 `./ringer.py hud` reuses an open Ringside tab when it has pinged the server within the last 15 seconds. Use `./ringer.py hud --force-open` to open a new tab anyway, or set `reuse_open_tab = false` under `[hud]` in your config to always open one.
+
+Ringer opens the browser through an owner-only launcher. Use `./ringer.py hud --force-open` to establish a session in the browser after restarting the server. Output reports use static previews, and active deliverables such as HTML and SVG open as downloads.
 
 **Live runs** shows every swarm, its progress, and a searchable task table. Select a task to inspect its brief, model, harness, attempts, last executed check and raw worker log. A failed check stays visible while its task retries; stopped workers are marked explicitly. **Outputs** keeps each run's result and saved versions together, with a live preview and access to its folder. **Models** shows first-try pass rates alongside task/attempt counts, task-type filtering and a low-sample warning. Expand all signals for the full scoreboard and judgment notes. Compact view keeps live runs and runs needing attention in a small window.
 

@@ -12,6 +12,12 @@ cargo tauri dev                    # live-reload dev mode
 
 The frontend is shared with the browser: `dashboard/ringside.html`, `dashboard/ringside.css`, `dashboard/ringside.js`, and `dashboard/assets/`, plus the native transport in `frontend/hud.js`. Both `scripts/sync-dist.sh` and `build.rs` copy these sources before embedding them. Edit the sources, never `dist/`. Native Models and Open folder use the local browser HUD; keep `ringer.py hud` running for those actions.
 
+## Linux GLib backport
+
+Tauri's GTK 0.18 stack requires glib 0.18. The Cargo patch uses the crates.io `glib-0.18.5` archive (SHA-256 `233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5`) with the two-line fix for RUSTSEC-2024-0429 applied to `src/variant_iter.rs`. The crate retains its upstream version, so version-only scans may still report the advisory. Remove the override once the Linux dependency tree resolves entirely to a fixed upstream release. [gtk-rs-core #1343](https://github.com/gtk-rs/gtk-rs-core/pull/1343)
+
+Run `cargo test --locked --release --test ringer_rust` on Linux to check the string iterator with serialized GLib fixtures under optimization.
+
 ## Behavior
 
 - Frameless, always-on-top, visible on all Spaces/desktops; drag anywhere that isn't a control.

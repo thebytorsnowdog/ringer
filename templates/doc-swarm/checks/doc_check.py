@@ -4,11 +4,25 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
+import os
 import re
-import subprocess
+import shlex
 import sys
 import tempfile
 from pathlib import Path
+
+
+# Prefer the checked-out helper. A copied kit can ship the three helper
+# modules alongside this script.
+parents = Path(__file__).resolve().parents
+if len(parents) > 3 and (checkout := parents[3]).joinpath("ringer_check_sandbox.py").is_file():
+    sys.path.insert(0, str(checkout))
+
+from ringer_check_sandbox import sandbox_command
+from ringer_file_scope import descend, open_directory, open_regular
+from ringer_reliability import run_bounded
 
 
 SKIP_DIRS = {
@@ -87,31 +101,38 @@ def code_spans(text: str) -> list[str]:
     return sorted(set(cleaned))
 
 
-def source_files(root: Path) -> list[Path]:
-    files: list[Path] = []
-    for path in root.rglob("*"):
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if not path.is_file():
-            continue
-        if path.stat().st_size > 1_000_000:
-            continue
-        files.append(path)
-    return files
+def source_files(root_fd: int, prefix: tuple[str, ...] = ()):
+    with os.scandir(root_fd) as entries:
+        for entry in entries:
+            if entry.name in SKIP_DIRS:
+                continue
+            parts = (*prefix, entry.name)
+            if entry.is_dir(follow_symlinks=False):
+                with descend(root_fd, (entry.name,)) as child:
+                    yield from source_files(child, parts)
+            elif entry.is_file(follow_symlinks=False):
+                yield parts
 
 
-def symbol_exists(symbol: str, files: list[Path]) -> bool:
-    needle = symbol.encode("utf-8", errors="ignore")
-    for path in files:
-        try:
-            data = path.read_bytes()
-        except OSError:
-            continue
-        if b"\0" in data[:2048]:
-            continue
-        if needle in data:
-            return True
-    return False
+def find_symbols(symbols: list[str], root: Path) -> set[str]:
+    missing = {symbol: symbol.encode("utf-8") for symbol in symbols}
+    with open_directory(root) as root_fd:
+        for parts in source_files(root_fd):
+            try:
+                with open_regular(root_fd, parts) as (stream, info):
+                    if info.st_size > 1_000_000:
+                        continue
+                    data = stream.read(1_000_001)
+            except OSError:
+                continue
+            if b"\0" in data[:2048]:
+                continue
+            for symbol in tuple(missing):
+                if missing[symbol] in data:
+                    del missing[symbol]
+            if not missing:
+                break
+    return set(missing)
 
 
 def fenced_blocks(markdown: str, language: str) -> list[str]:
@@ -139,30 +160,47 @@ def suffix_for(language: str) -> str:
     return mapping.get(language.lower(), ".txt")
 
 
-def run_examples(blocks: list[str], language: str, runner: str, cwd: Path) -> bool:
+async def run_example(block: str, suffix: str, runner: str, cwd: Path, source_root: Path, index: int):
+    with tempfile.TemporaryDirectory(prefix="doc-example-") as tmp, contextlib.ExitStack() as stack:
+        scratch = Path(tmp).resolve()
+        work = scratch / "work"
+        work.mkdir()
+        (scratch / "home").mkdir()
+        # Relative imports and fixture reads still work. Their targets are in
+        # the read-only source view and the example can create its own files.
+        cwd_fd = stack.enter_context(open_directory(cwd))
+        with os.scandir(cwd_fd) as entries:
+            for entry in entries:
+                if entry.name not in {".git", ".runtime"}:
+                    (work / entry.name).symlink_to(cwd / entry.name)
+        inputs = [(source_root, stack.enter_context(open_directory(source_root)))]
+        if cwd != source_root and source_root not in cwd.parents:
+            inputs.append((cwd, cwd_fd))
+        with tempfile.NamedTemporaryFile(mode="w", prefix=f"example_{index}_", suffix=suffix,
+                                         dir=work, encoding="utf-8", delete=False) as example:
+            example.write(block + "\n")
+        command = runner
+        for placeholder, value in (("{file}", example.name), ("{example_cwd}", str(cwd))):
+            command = command.replace(f"'{placeholder}'", placeholder).replace(f'"{placeholder}"', placeholder)
+            command = command.replace(placeholder, shlex.quote(value))
+        with sandbox_command(command, cwd=work, scratch=scratch, read_mounts=inputs) as (argv, fds, env, host_cwd):
+            return await run_bounded(argv, host_cwd, 60, env=env, pass_fds=fds)
+
+
+def run_examples(blocks: list[str], language: str, runner: str, cwd: Path, source_root: Path) -> bool:
     ok = True
-    with tempfile.TemporaryDirectory(prefix="doc-example-") as tmp:
-        tmpdir = Path(tmp)
-        for index, block in enumerate(blocks, start=1):
-            example = tmpdir / f"example_{index}{suffix_for(language)}"
-            example.write_text(block + "\n", encoding="utf-8")
-            command = runner.replace("{file}", str(example)).replace("{example_cwd}", str(cwd))
-            proc = subprocess.run(
-                command,
-                shell=True,
-                cwd=cwd,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=False,
-                timeout=60,
+    for index, block in enumerate(blocks, start=1):
+        try:
+            rc, timed_out, output = asyncio.run(
+                run_example(block, suffix_for(language), runner, cwd, source_root, index)
             )
-            if proc.returncode != 0:
-                print(f"FAIL: runnable example {index} failed with exit {proc.returncode}")
-                print(proc.stdout[-2000:])
-                ok = False
-            else:
-                print(f"OK: runnable example {index} executed")
+        except OSError as exc:
+            print(f"FAIL: isolated example {index} could not start: {exc}")
+            return False
+        if timed_out or rc != 0:
+            print(f"FAIL: runnable example {index} {'timed out' if timed_out else f'failed with exit {rc}'}")
+            print(output)
+            ok = False
     return ok
 
 
@@ -180,9 +218,9 @@ def main() -> int:
     parser.add_argument("--example-cwd", required=True)
     args = parser.parse_args()
 
-    doc_path = Path(args.doc_path)
-    source_root = Path(args.source_root)
-    example_cwd = Path(args.example_cwd)
+    doc_path = Path(args.doc_path).absolute()
+    source_root = Path(args.source_root).absolute()
+    example_cwd = Path(args.example_cwd).absolute()
     try:
         min_words = int(args.min_words)
         min_section_words = int(args.min_section_words)
@@ -190,17 +228,15 @@ def main() -> int:
         print("FAIL: MIN_WORDS and MIN_SECTION_WORDS must be integers")
         return 1
 
-    if not doc_path.exists() or doc_path.stat().st_size == 0:
-        print(f"FAIL: doc file is missing or empty: {doc_path}")
-        return 1
-    if not source_root.exists():
-        print(f"FAIL: source root does not exist: {source_root}")
-        return 1
-    if not example_cwd.exists():
-        print(f"FAIL: example cwd does not exist: {example_cwd}")
+    try:
+        with open_directory(doc_path.parent) as parent, open_regular(parent, (doc_path.name,)) as (stream, info):
+            if info.st_size > 20 * 1024 * 1024:
+                raise OSError("doc is larger than 20 MB")
+            markdown = stream.read(info.st_size).decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        print(f"FAIL: cannot read doc {doc_path}: {exc}")
         return 1
 
-    markdown = doc_path.read_text(encoding="utf-8")
     all_words = words(markdown)
     if len(all_words) < min_words:
         print(f"FAIL: doc has {len(all_words)} words; minimum is {min_words}")
@@ -228,17 +264,20 @@ def main() -> int:
         print(f"FAIL: no checkable code-span symbols found in section '{args.symbol_section}'")
         failures = True
     else:
-        files = source_files(source_root)
-        for symbol in symbols_to_check:
-            if not symbol_exists(symbol, files):
-                print(f"FAIL: documented symbol not found in source tree: {symbol}")
-                failures = True
+        try:
+            missing = find_symbols(symbols_to_check, source_root)
+        except OSError as exc:
+            print(f"FAIL: cannot scan source {source_root}: {exc}")
+            return 1
+        for symbol in sorted(missing):
+            print(f"FAIL: documented symbol not found in source tree: {symbol}")
+            failures = True
 
     examples = fenced_blocks(markdown, args.runnable_language)
     if not examples:
         print(f"FAIL: no runnable fenced examples labeled {args.runnable_language}")
         failures = True
-    elif not run_examples(examples, args.runnable_language, args.example_runner, example_cwd):
+    elif not run_examples(examples, args.runnable_language, args.example_runner, example_cwd, source_root):
         failures = True
 
     if failures:

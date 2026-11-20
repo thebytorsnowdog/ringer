@@ -34,6 +34,7 @@ class HudReuseTabTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.config = hud_config(self.root)
+        ringer.write_hud_token(self.config.state_dir, "d" * 43)
         self.output = io.StringIO()
         for name, value in (("hud_is_alive", True), ("hud_is_healthy", True)):
             if not hasattr(ringer, name):  # hud_is_healthy exists only on newer checkouts
@@ -59,7 +60,9 @@ class HudReuseTabTests(unittest.TestCase):
         self.assertEqual(0, result)
 
     def assert_opened_once(self) -> None:
-        self.opener.assert_called_once_with("http://127.0.0.1:8700")
+        launcher = self.config.state_dir / "browser-8700.html"
+        self.opener.assert_called_once_with(launcher.as_uri())
+        self.assertIn("http://127.0.0.1:8700/#ringer-session=", launcher.read_text())
 
     def test_alive_recent_viewer_reuses_tab_and_prints_one_line(self) -> None:
         self.run_hud()
@@ -188,8 +191,9 @@ class HudViewerServerTests(unittest.TestCase):
                 self.assertGreaterEqual(seconds, 0)
                 self.assertLess(seconds, 5)
                 self.assertTrue(ringer.hud_has_recent_viewer(port, state_dir=state_dir))
-                # Without the token file the CLI sees a live HUD but no viewer data.
-                self.assertTrue(ringer.hud_is_alive(port))
+                # Only a CLI with the owner token can confirm this is its HUD.
+                self.assertTrue(ringer.hud_is_alive(port, state_dir=state_dir))
+                self.assertFalse(ringer.hud_is_alive(port))
                 self.assertFalse(ringer.hud_has_recent_viewer(port))
             finally:
                 server.stop()

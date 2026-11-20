@@ -1009,6 +1009,7 @@
       </div>
     </div>
   </div>
+  <script src="/artifact-preview.js"></script>
   <script>
     const app = document.getElementById("app");
     const headline = document.getElementById("headline");
@@ -1047,9 +1048,9 @@
     const WORKER_LOG_POLL_MS = 1000;
     const MODELS_REFRESH_MS = 30000;
     const TAURI_INVOKE = window.__TAURI__?.core?.invoke;
-    const TAURI_CONVERT_FILE_SRC = window.__TAURI__?.core?.convertFileSrc;
     const IS_TAURI = Boolean(TAURI_INVOKE);
-    const INLINE_FRAME_ATTR = "src" + "doc";
+    const preview = window.ringerArtifactPreview;
+    const localFetch = preview.browserFetch;
     const REPORT_FILE_NAMES = ["report.md", "report.html"];
     const RUNNING_LOG_STATUSES = new Set(["running", "retrying"]);
 
@@ -1069,7 +1070,6 @@
     let artifactUserSelected = false;
     let lastArtifactPath = null;
     let displayedArtifactHtml = null;
-    let displayedArtifactSrc = null;
     let artifactRefreshTimer = null;
     let artifactRefreshInFlight = false;
     let artifactRefreshSeq = 0;
@@ -1078,7 +1078,6 @@
     let modelsLastFetchMs = 0;
     let modelsPayload = null;
     let expandedModelKey = null;
-    let localStatePollFailed = false;
 
     const DEFAULT_SETTINGS = {
       version: 1,
@@ -1208,11 +1207,6 @@
       return parts.length > 0 ? parts.map(String).join("|") : `run-${index}`;
     }
 
-    function dashboardPort(run) {
-      const port = Number(run?.dashboard_port ?? run?.port);
-      return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
-    }
-
     function taskKey(task, index) {
       return String(task.__taskKey || task.key || task.id || task.name || `task-${index}`);
     }
@@ -1257,13 +1251,6 @@
       return sanitized || "artifact";
     }
 
-    function fileHref(path) {
-      const text = String(path || "").trim();
-      if (!text) return "";
-      if (/^(?:file|https?):/i.test(text)) return text;
-      return `file://${encodeURI(text).replace(/#/g, "%23")}`;
-    }
-
     function artifactWrapperHref(run, task, sourcePath) {
       if (!run?.artifact_path || !sourcePath) return "";
       const artifactDir = pathDirName(run.artifact_path);
@@ -1273,7 +1260,7 @@
       const sourceName = pathBaseName(sourcePath);
       if (!sourceName) return "";
       const wrapperPath = `${artifactDir}/view/${sanitizeArtifactName(runId)}/${sanitizeArtifactName(key)}--${sanitizeArtifactName(sourceName)}.html`;
-      return fileHref(wrapperPath);
+      return preview.viewerHref(artifactHttpHref(wrapperPath));
     }
 
     function linkHtml(href, label) {
@@ -1283,18 +1270,21 @@
 
     function taskLinksHtml(run, task) {
       const links = [];
-      if (task.taskdir) links.push(linkHtml(fileHref(task.taskdir), "taskdir"));
+      if (IS_TAURI) return "";
 
       const logPath = task.log_path || (task.taskdir ? `${task.taskdir}/worker.log` : "");
       if (logPath) {
-        links.push(linkHtml(artifactWrapperHref(run, task, logPath) || fileHref(logPath), "worker.log"));
+        links.push(linkHtml(preview.viewerHref(`/logs/${encodeURIComponent(workerLogKey(task))}`), "worker.log"));
       }
 
       const reportPaths = task.report_paths && typeof task.report_paths === "object" ? task.report_paths : {};
       for (const name of REPORT_FILE_NAMES) {
         const reportPath = reportPaths[name];
         if (reportPath) {
-          links.push(linkHtml(artifactWrapperHref(run, task, reportPath) || fileHref(reportPath), name));
+          const href = name === "report.html"
+            ? String(reportPath).includes("/artifacts/") && preview.viewerHref(artifactHttpHref(reportPath))
+            : artifactWrapperHref(run, task, reportPath);
+          links.push(linkHtml(href, name));
         }
       }
       return links.filter(Boolean).join(" ");
@@ -1312,35 +1302,16 @@
       return RUNNING_LOG_STATUSES.has(String(task?.status || "").toLowerCase());
     }
 
-    function sameLocalDashboardOrigin(port) {
-      return Boolean(port)
-        && location.protocol === "http:"
-        && location.hostname === "127.0.0.1"
-        && location.port === String(port);
-    }
-
-    function workerLogHttpHref(run, task) {
-      const key = workerLogKey(task);
-      if (!key) return "";
-      const encodedKey = encodeURIComponent(key);
-      const port = dashboardPort(run);
-      if (sameLocalDashboardOrigin(port)) {
-        return `http://127.0.0.1:${port}/logs/${encodedKey}`;
-      }
-      return `/logs/${encodedKey}`;
-    }
-
-    async function readWorkerLog(run, task) {
+    async function readWorkerLog(task) {
       const path = workerLogPath(task);
       if (IS_TAURI) {
         if (!path) throw new Error("worker log path not recorded");
         return tauriInvoke("read_worker_log", {path});
       }
 
-      const href = workerLogHttpHref(run, task);
-      if (!href) throw new Error("worker log key not recorded");
-      const separator = href.includes("?") ? "&" : "?";
-      const response = await fetch(`${href}${separator}t=${Date.now()}`, {cache: "no-store"});
+      const key = workerLogKey(task);
+      if (!key) throw new Error("worker log key not recorded");
+      const response = await localFetch(`/logs/${encodeURIComponent(key)}`);
       if (!response.ok) throw new Error(`worker log ${response.status}`);
       return response.text();
     }
@@ -1388,7 +1359,7 @@
       const seq = ref.workerLogSeq || 0;
       ref.workerLogInFlight = true;
       try {
-        const text = await readWorkerLog(run, task);
+        const text = await readWorkerLog(task);
         if (openTaskRef !== ref || ref.workerLogSeq !== seq) return;
         ref.workerLogText = text || "(worker log is empty)";
         setWorkerStreamText(stream, ref.workerLogText);
@@ -1941,7 +1912,7 @@
       modelsRefreshInFlight = true;
       setText(modelsState, modelsPayload ? "refreshing models..." : "loading models...");
       try {
-        const response = await fetch(`/api/models?t=${Date.now()}`, {cache: "no-store"});
+        const response = await localFetch("/api/models");
         modelsPayload = await response.json();
         modelsLastFetchMs = Date.now();
       } catch (err) {
@@ -2264,7 +2235,7 @@
         const text = await tauriInvoke("read_artifact_library");
         return JSON.parse(text);
       }
-      const response = await fetch(`/artifacts/library.json?t=${Date.now()}`, {cache: "no-store"});
+      const response = await localFetch("/artifacts/library.json");
       if (!response.ok) throw new Error(`library ${response.status}`);
       return response.json();
     }
@@ -2279,16 +2250,9 @@
       return `/artifacts/${relative.split("/").filter(Boolean).map(encodeURIComponent).join("/")}`;
     }
 
-    function artifactAssetHref(path) {
-      const text = String(path || "").trim();
-      if (!text) throw new Error("artifact path unavailable");
-      if (!TAURI_CONVERT_FILE_SRC) throw new Error("Tauri asset converter unavailable");
-      return TAURI_CONVERT_FILE_SRC(text);
-    }
-
     async function readArtifactHtml(path) {
-      const href = artifactHttpHref(path);
-      const response = await fetch(`${href}?t=${Date.now()}`, {cache: "no-store"});
+      if (IS_TAURI) return tauriInvoke("read_artifact_html", {path});
+      const response = await localFetch(artifactHttpHref(path));
       if (!response.ok) throw new Error(`artifact ${response.status}`);
       return response.text();
     }
@@ -2308,7 +2272,6 @@
     function resetDisplayedArtifact() {
       lastArtifactPath = null;
       displayedArtifactHtml = null;
-      displayedArtifactSrc = null;
       artifactRefreshSeq++;
     }
 
@@ -2352,27 +2315,6 @@
         if (version) return {artifact, path: version.path, live: false, version};
       }
       return {artifact, path: artifact.live_path, live: true, version: null};
-    }
-
-    function runIdValue(run) {
-      return String(run?.run_id ?? run?.id ?? "");
-    }
-
-    function liveRunForArtifact(artifact) {
-      const currentRunId = String(artifact?.current_run_id || "");
-      if (currentRunId) {
-        const byId = currentRuns.find(run => run.state === "live" && runIdValue(run) === currentRunId);
-        if (byId) return byId;
-      }
-      return currentRuns.find(run => run.state === "live" && String(run.run_name || "") === artifact?.name) || null;
-    }
-
-    function liveArtifactFrameHref(artifact) {
-      const run = liveRunForArtifact(artifact);
-      const port = dashboardPort(run);
-      if (!run || run.state !== "live" || !port) return "";
-      const runName = sanitizeArtifactName(run.run_name || artifact?.name || "artifact");
-      return `http://127.0.0.1:${port}/artifacts/live/${encodeURIComponent(runName)}.html`;
     }
 
     function artifactVersionLabel(version) {
@@ -2507,122 +2449,30 @@
       artifactFrameWrap.appendChild(empty);
       lastArtifactPath = null;
       displayedArtifactHtml = null;
-      displayedArtifactSrc = null;
     }
 
     function showArtifactLoadError(reason) {
       showArtifactEmpty(`couldn't load this artifact \u2014 ${reason || "unknown error"}`);
     }
 
-    function stripMetaRefresh(html) {
-      return String(html || "").replace(/<meta\b(?=[^>]*\bhttp-equiv\s*=\s*["']?refresh["']?)[^>]*>/gi, "");
-    }
-
-    function ensureArtifactFrame() {
+    function showArtifactHtml(path, raw) {
       let frame = artifactFrameWrap.querySelector("iframe");
       if (!frame) {
-        artifactFrameWrap.innerHTML = "";
         frame = document.createElement("iframe");
-        frame.setAttribute("title", "Ringside artifact");
-        frame.addEventListener("error", () => showArtifactLoadError("frame load failed"));
-        artifactFrameWrap.appendChild(frame);
+        frame.title = "Ringside artifact";
+        artifactFrameWrap.replaceChildren(frame);
       }
-      return frame;
-    }
-
-    function cacheBustHref(href, key) {
-      const separator = href.includes("?") ? "&" : "?";
-      return `${href}${separator}${key}=${Date.now()}`;
-    }
-
-    function showArtifactFrameHref(path, href, opts = {}) {
-      const frame = ensureArtifactFrame();
-      if (opts.force || lastArtifactPath !== path || displayedArtifactSrc !== href) {
-        frame.removeAttribute(INLINE_FRAME_ATTR);
-        const src = opts.force && opts.cacheBust !== false ? cacheBustHref(href, "ringside") : href;
-        frame.setAttribute("src", src);
-        displayedArtifactSrc = href;
-        displayedArtifactHtml = null;
-      }
-      lastArtifactPath = path;
-    }
-
-    function showArtifactFilePath(path, opts = {}) {
-      const href = artifactAssetHref(path);
-      showArtifactFrameHref(path, href, {...opts, cacheBust: false});
-      return true;
-    }
-
-    function showArtifactHtml(path, html, opts = {}) {
-      if (IS_TAURI) {
-        showArtifactLoadError("inline artifact HTML is disabled in Tauri mode");
-        return;
-      }
-      const frame = ensureArtifactFrame();
-      const staticHtml = stripMetaRefresh(html);
-      if (opts.force || lastArtifactPath !== path || displayedArtifactHtml !== staticHtml || displayedArtifactSrc !== null) {
-        frame.removeAttribute("src");
-        frame[INLINE_FRAME_ATTR] = opts.force ? `${staticHtml}\n<!-- ringside-refresh:${Date.now()} -->` : staticHtml;
-        displayedArtifactHtml = staticHtml;
-        displayedArtifactSrc = null;
-      }
-      lastArtifactPath = path;
-    }
-
-    async function artifactServerResponds(href) {
-      if (!href) return false;
-      try {
-        const response = await fetch(cacheBustHref(href, "ringside_probe"), {
-          method: "GET",
-          cache: "no-store",
-          mode: "no-cors",
-        });
-        return response.type === "opaque" || response.ok;
-      } catch (_err) {
-        return false;
-      }
-    }
-
-    function artifactNeedsSnapshot(target, liveHref) {
-      if (IS_TAURI) return false;
-      if (!target?.path) return false;
-      if (!target.live) return true;
-      if (artifactLibraryError || localStatePollFailed) return true;
-      if (target.artifact.state !== "live") return true;
-      return !liveHref;
-    }
-
-    function currentArtifactLiveHrefIs(path, href) {
-      const target = selectedArtifactTarget();
-      const currentHref = target?.live && target.artifact.state === "live" ? liveArtifactFrameHref(target.artifact) : "";
-      return target?.path === path && currentHref === href;
-    }
-
-    async function swapArtifactFrameToSnapshot(target, opts = {}) {
-      const path = target?.path || null;
-      if (!path) return false;
-      if (IS_TAURI) return showArtifactFilePath(path, opts);
-      if (!opts.force && lastArtifactPath === path && displayedArtifactHtml !== null && displayedArtifactSrc === null) return true;
-      const requestSeq = ++artifactRefreshSeq;
-      const html = await readArtifactHtml(path);
-      const currentTarget = selectedArtifactTarget();
-      const currentLiveHref = currentTarget?.live && currentTarget.artifact.state === "live" ? liveArtifactFrameHref(currentTarget.artifact) : "";
-      if (requestSeq !== artifactRefreshSeq || viewMode !== "artifact" || currentTarget?.path !== path) return false;
-      if (!opts.force && !artifactNeedsSnapshot(currentTarget, currentLiveHref)) return false;
-      showArtifactHtml(path, html, {force: !!opts.force});
-      return true;
-    }
-
-    function swapArtifactFrameToSnapshotForStateChange() {
-      if (IS_TAURI) return false;
-      if (viewMode !== "artifact") return false;
-      const target = selectedArtifactTarget();
-      const liveHref = target?.live && target.artifact.state === "live" ? liveArtifactFrameHref(target.artifact) : "";
-      if (!artifactNeedsSnapshot(target, liveHref)) return false;
-      swapArtifactFrameToSnapshot(target).catch(() => {
-        if (viewMode === "artifact") showArtifactLoadError("artifact unavailable");
+      const source = IS_TAURI ? preview.fileURL(path) : new URL(artifactHttpHref(path), location.href);
+      preview.render(frame, raw, source, (url) => {
+        if (IS_TAURI) {
+          const readFile = (path) => tauriInvoke("read_artifact_file", {path});
+          preview.downloadFile(readFile, url).catch(error => showArtifactLoadError(error.message));
+        } else {
+          preview.openBrowserLink(url);
+        }
       });
-      return true;
+      lastArtifactPath = path;
+      displayedArtifactHtml = raw;
     }
 
     function startArtifactRefreshTimer() {
@@ -2651,23 +2501,13 @@
           showArtifactEmpty(artifactLibraryEntries.length ? "artifact path unavailable" : (artifactLibraryError || "no artifacts recorded yet"));
           return;
         }
-        if (IS_TAURI) {
-          showArtifactFilePath(path, {force: !!opts.force});
-          return;
-        }
-        const liveHref = target.live && target.artifact.state === "live" ? liveArtifactFrameHref(target.artifact) : "";
-        if (artifactNeedsSnapshot(target, liveHref)) {
-          await swapArtifactFrameToSnapshot(target, {force: !!opts.force});
-          return;
-        }
+        if (!opts.force && !target.live && lastArtifactPath === path) return;
         const requestSeq = ++artifactRefreshSeq;
-        const serverLive = await artifactServerResponds(liveHref);
-        if (requestSeq !== artifactRefreshSeq || viewMode !== "artifact" || !currentArtifactLiveHrefIs(path, liveHref)) return;
-        if (serverLive) {
-          showArtifactFrameHref(path, liveHref, {force: !!opts.force});
-          return;
+        const raw = await readArtifactHtml(path);
+        if (requestSeq !== artifactRefreshSeq || viewMode !== "artifact" || selectedArtifactTarget()?.path !== path) return;
+        if (opts.force || lastArtifactPath !== path || displayedArtifactHtml !== raw) {
+          showArtifactHtml(path, raw);
         }
-        await swapArtifactFrameToSnapshot(target, {force: !!opts.force});
       } catch (err) {
         if (viewMode === "artifact") showArtifactLoadError(err?.message || "artifact unavailable");
       } finally {
@@ -2681,27 +2521,17 @@
       syncRunNodes(currentRuns);
       applyAgentFilter();
       syncArtifactLibraryView();
-      if (viewMode === "artifact" && !opts.tick && !swapArtifactFrameToSnapshotForStateChange()) refreshArtifactView();
+      if (viewMode === "artifact" && !opts.tick) refreshArtifactView();
     }
 
     async function pollLocalState() {
       try {
-        const response = await fetch(`/state.json?t=${Date.now()}`, {cache: "no-store"});
-        if (!response.ok) {
-          if (!IS_TAURI) {
-            localStatePollFailed = true;
-            swapArtifactFrameToSnapshotForStateChange();
-          }
-          return;
-        }
+        const response = await localFetch("/state.json");
+        if (!response.ok) return;
         const state = await response.json();
-        localStatePollFailed = false;
         update(Array.isArray(state) ? state : [state]);
       } catch (_err) {
-        if (!IS_TAURI) {
-          localStatePollFailed = true;
-          swapArtifactFrameToSnapshotForStateChange();
-        }
+        // Keep displaying the last observed state while the server is unavailable.
       }
     }
 

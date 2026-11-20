@@ -16,6 +16,7 @@ import shlex
 import signal
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 
@@ -40,7 +41,8 @@ import webbrowser
 import uuid
 
 from ringer_billing import (
-    Admission, admit, billing_policy_path, task_billing_fields, usage_evidence, settle_admission,
+    Admission, admit, billing_policy_path, codex_subscription_env, enforce_codex_command,
+    task_billing_fields, usage_evidence, settle_admission,
 )
 from ringer_costs import SpendLedger, validate_cost_policy
 from ringer_delegation import TableRouteError, route_from_table
@@ -63,9 +65,13 @@ from ringer_capabilities import (
 from ringer_reliability import (
     LifecycleJournal, OPENROUTER_FALLBACK_ENGINES, SUBSCRIPTION_ENGINES,
     TERMINAL_STATUSES, check_subscription_quota_cap, classify_failure,
-    read_export_evidence, read_outcomes, reliability_fields, run_bounded,
-    sha256_file, should_retry,
+    read_export_evidence, read_outcomes, reliability_fields, run_bounded, run_isolated_check,
+    should_retry,
     stop_process_tree, summarise_outcomes,
+)
+from ringer_file_scope import (
+    MAX_OUTPUT_BYTES, append_log, atomic_output, copy_output, external_outputs, open_directory, open_expected,
+    open_regular,
 )
 from dataclasses import asdict, dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
@@ -100,7 +106,7 @@ ACTIVITY_TAIL_BYTES = 2048
 ACTIVITY_TEXT_LIMIT = 80
 ARTIFACT_WRAPPER_TAIL_BYTES = 256 * 1024
 ARTIFACT_LIBRARY_MAX_VERSIONS = 20
-DELIVERABLE_MAX_BYTES = 20 * 1024 * 1024
+DELIVERABLE_MAX_BYTES = MAX_OUTPUT_BYTES
 WORKER_LOG_TAIL_BYTES = 64 * 1024
 TASK_REPORT_FILENAMES = ("report.md", "report.html")
 TEXT_DELIVERABLE_SUFFIXES = {".md", ".txt", ".log"}
@@ -127,6 +133,13 @@ CSP_META_TAG = (
 )
 DASHBOARD_HTML_PATH = Path(__file__).resolve().parent / "dashboard" / "dashboard.html"
 RINGSIDE_HTML_PATH = Path(__file__).resolve().parent / "dashboard" / "ringside.html"
+ARTIFACT_VIEWER_HTML = b"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Ringer output</title>
+<style>body { font: 16px system-ui; } iframe { border: 0; position: fixed; inset: 0;
+width: 100%; height: 100%; }</style></head>
+<body><main id="artifact-viewer">Loading output...</main>
+<script src="/artifact-preview.js"></script></body></html>
+"""
 MINIMAL_DASHBOARD_HTML = """<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>ringer dashboard</title></head>
@@ -1793,6 +1806,7 @@ class TaskSpec:
     task_class: str = ""
     task_type: str = ""
     check_timeout_s: float = CHECK_TIMEOUT_S
+    check_read_paths: tuple[str, ...] = ()
     preflight_timeout_s: float = 15
     preflight_command: str = ""
     preflight_files: tuple[str, ...] = ()
@@ -1832,6 +1846,7 @@ class TaskSpec:
             "task_class": self.task_class,
             "task_type": self.task_type,
             "check_timeout_s": self.check_timeout_s,
+            **({"check_read_paths": list(self.check_read_paths)} if self.check_read_paths else {}),
             "preflight_timeout_s": self.preflight_timeout_s,
             "preflight_command": self.preflight_command,
             "preflight_files": list(self.preflight_files),
@@ -4527,18 +4542,21 @@ class ArtifactRenderer:
         task_key: str,
         force: bool = False,
     ) -> None:
-        stat = source_path.stat()
-        cache_key = (source_path.resolve(), wrapper_path)
-        current = (stat.st_mtime_ns, stat.st_size)
-        if not force and wrapper_path.exists() and self._wrapper_cache.get(cache_key) == current:
-            return
-
-        html = render_file_wrapper_html(
-            source_path=source_path,
-            source_stat=stat,
-            run_name=run_name,
-            task_key=task_key,
-        )
+        source_path = source_path.absolute()
+        cache_key = (source_path, wrapper_path)
+        with open_directory(source_path.parent) as parent:
+            with open_regular(parent, (source_path.name,), nonempty=False) as (source, info):
+                current = (info.st_mtime_ns, info.st_size)
+                if not force and wrapper_path.exists() and self._wrapper_cache.get(cache_key) == current:
+                    return
+                source.seek(max(0, info.st_size - ARTIFACT_WRAPPER_TAIL_BYTES))
+                html = render_file_wrapper_html(
+                    source_path=source_path,
+                    source_stat=info,
+                    raw=source.read(ARTIFACT_WRAPPER_TAIL_BYTES),
+                    run_name=run_name,
+                    task_key=task_key,
+                )
         atomic_write_text(wrapper_path, html)
         self._wrapper_cache[cache_key] = current
 
@@ -4547,16 +4565,12 @@ def render_file_wrapper_html(
     *,
     source_path: Path,
     source_stat: os.stat_result,
+    raw: bytes,
     run_name: str,
     task_key: str,
 ) -> str:
     size = int(source_stat.st_size)
     truncated = size > ARTIFACT_WRAPPER_TAIL_BYTES
-    start = max(0, size - ARTIFACT_WRAPPER_TAIL_BYTES)
-    with source_path.open("rb") as fh:
-        if start:
-            fh.seek(start)
-        raw = fh.read()
     content = raw.decode("utf-8", errors="replace")
     source_mtime = datetime.fromtimestamp(source_stat.st_mtime).astimezone().strftime(
         "%Y-%m-%d %H:%M:%S %Z"
@@ -5275,9 +5289,17 @@ def render_task_links(
         report_file = Path(str(report_value)) if report_value else None
         if report_file is None and taskdir_path is not None:
             report_file = taskdir_path / report_name
-        if report_file is not None and report_file.exists():
+        if report_file is not None:
+            try:
+                with open_directory(report_file.absolute().parent) as parent, open_regular(parent, (report_file.name,)):
+                    pass
+            except OSError:
+                continue
             if renderer:
-                renderer.link_for_source(report_file, state=state, task_key=task_key, force=force_wrappers)
+                try:
+                    renderer.link_for_source(report_file, state=state, task_key=task_key, force=force_wrappers)
+                except OSError:
+                    continue
                 href = portable(renderer.wrapper_path(run_id=str(state.get("run_id") or "run"), task_key=task_key, source_name=report_file.name)) if not is_html_artifact(report_file) else portable(report_file)
             else:
                 href = file_href(report_file)
@@ -5290,11 +5312,16 @@ def render_task_links(
         worker_log = taskdir_path / "worker.log"
     if worker_log is not None and worker_log.exists():
         if renderer:
-            renderer.link_for_source(worker_log, state=state, task_key=task_key, force=force_wrappers)
-            href = portable(renderer.wrapper_path(run_id=str(state.get("run_id") or "run"), task_key=task_key, source_name=worker_log.name))
+            try:
+                renderer.link_for_source(worker_log, state=state, task_key=task_key, force=force_wrappers)
+            except OSError:
+                href = ""
+            else:
+                href = portable(renderer.wrapper_path(run_id=str(state.get("run_id") or "run"), task_key=task_key, source_name=worker_log.name))
         else:
             href = file_href(worker_log)
-        links.append(f'<a href="{html_escape(href)}">view the work log</a>')
+        if href:
+            links.append(f'<a href="{html_escape(href)}">view the work log</a>')
 
     return " &middot; ".join(links) if links else '<span class="muted">—</span>'
 
@@ -5721,16 +5748,21 @@ def send_response_body(
     *,
     content_type: str,
     no_store: bool = False,
+    headers: dict[str, str] | None = None,
 ) -> None:
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
+    handler.send_header("Referrer-Policy", "no-referrer")
+    handler.send_header("X-Content-Type-Options", "nosniff")
     # The native webview reads only this local HUD. Never expose it to arbitrary sites.
-    origin = handler.headers.get("Origin", "")
-    if origin in NATIVE_HUD_ORIGINS:
+    origin = native_hud_origin(handler)
+    if origin is not None:
         handler.send_header("Access-Control-Allow-Origin", origin)
         handler.send_header("Vary", "Origin")
     if no_store:
         handler.send_header("Cache-Control", "no-store")
+    for name, value in (headers or {}).items():
+        handler.send_header(name, value)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -5747,10 +5779,8 @@ def send_json_response(handler: BaseHTTPRequestHandler, data: dict[str, Any]) ->
     )
 
 
-# The HUD listens on a fixed loopback port, so any web page can aim requests at
-# it and DNS rebinding can make those requests same-origin. Three guards close
-# that: only loopback Host headers are served, /api/* needs this launch's token,
-# and the one side effect (open-folder) is a POST from a known Origin.
+# Loopback and Host checks constrain the listener. A launch credential also
+# authenticates private routes, including logs and direct artifact navigation.
 HUD_TOKEN_HEADER = "X-Ringer-Token"
 HUD_TOKEN_FILE_NAME = "hud.token"
 NATIVE_HUD_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"})
@@ -5762,27 +5792,46 @@ def hud_token_path(state_dir: Path) -> Path:
 
 def write_hud_token(state_dir: Path, token: str) -> None:
     """Leave this launch's token where the CLI and the native shell can read it (owner-only)."""
-    path = hud_token_path(state_dir)
+    write_owner_file(hud_token_path(state_dir), token)
+
+
+def write_owner_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(token)
-    os.replace(temp_path, path)
+    parent = path.parent.stat()
+    if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
+        raise PermissionError(f"dashboard state directory must be writable only by its owner: {path.parent}")
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def read_hud_token(state_dir: Path | None) -> str:
     if state_dir is None:
         return ""
     try:
-        return hud_token_path(state_dir).read_text(encoding="utf-8").strip()
-    except OSError:
+        fd = os.open(hud_token_path(state_dir), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                return ""
+            token = handle.read(128).strip()
+            return token if re.fullmatch(r"[A-Za-z0-9_-]{43}", token) else ""
+    except (OSError, UnicodeError):
         return ""
 
 
 def loopback_host_allowed(handler: BaseHTTPRequestHandler, port: int | None) -> bool:
     host = handler.headers.get("Host", "")
     return port is not None and host in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+
+def native_hud_origin(handler: BaseHTTPRequestHandler) -> str | None:
+    requested = handler.headers.get("Origin", "")
+    return next((allowed for allowed in NATIVE_HUD_ORIGINS if allowed == requested), None)
 
 
 def hud_origin_allowed(handler: BaseHTTPRequestHandler, port: int | None) -> bool:
@@ -5792,16 +5841,62 @@ def hud_origin_allowed(handler: BaseHTTPRequestHandler, port: int | None) -> boo
     return port is not None and origin in {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
 
-def hud_token_matches(handler: BaseHTTPRequestHandler, token: str) -> bool:
-    supplied = handler.headers.get(HUD_TOKEN_HEADER, "")
-    return bool(token) and hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))
+def dashboard_browser_token(token: str) -> str:
+    return hmac.digest(token.encode("ascii"), b"ringer-browser", "sha256").hex()
 
 
-def inject_hud_token_into_html(html: str, token: str) -> str:
-    meta = f'<meta name="ringer-token" content="{html_escape(token, quote=True)}" />'
-    if "<head>" in html:
-        return html.replace("<head>", f"<head>\n    {meta}", 1)
-    return meta + html
+def write_dashboard_launcher(state_dir: Path, port: int, token: str) -> Path:
+    url = f"http://127.0.0.1:{port}/#ringer-session={dashboard_browser_token(token)}"
+    # The browser command line contains only the launcher path. Its contents
+    # are readable by the owner even when the process list is shared.
+    launcher = state_dir / f"browser-{port}.html"
+    content = (
+        '<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
+        f'<meta http-equiv="refresh" content="0;url={url}"><title>Ringer</title>'
+        f'<a href="{url}">Open the Ringer dashboard</a>'
+    )
+    write_owner_file(launcher, content)
+    return launcher.resolve()
+
+
+def open_dashboard_browser(state_dir: Path, port: int, token: str) -> None:
+    if token:
+        open_in_browser(write_dashboard_launcher(state_dir, port, token).as_uri())
+
+
+def dashboard_private_request(handler: BaseHTTPRequestHandler, token: str) -> bool:
+    supplied = handler.headers.get(HUD_TOKEN_HEADER, "").encode("utf-8")
+    if token and (
+        hmac.compare_digest(supplied, token.encode("ascii"))
+        or hmac.compare_digest(supplied, dashboard_browser_token(token).encode("ascii"))
+    ):
+        return True
+    handler.send_error(HTTPStatus.UNAUTHORIZED, "launch Ringer to open a private dashboard session")
+    return False
+
+
+def serve_artifact_frontend(handler: BaseHTTPRequestHandler, path: str) -> bool:
+    if path == "/view":
+        send_dashboard_page(handler, ARTIFACT_VIEWER_HTML)
+        return True
+    if path == "/artifact-preview.js":
+        try:
+            body = RINGSIDE_HTML_PATH.with_name("artifact-preview.js").read_bytes()
+        except OSError:
+            handler.send_error(HTTPStatus.NOT_FOUND)
+            return True
+        send_response_body(
+            handler, HTTPStatus.OK, body, content_type="text/javascript; charset=utf-8", no_store=True,
+        )
+        return True
+    return False
+
+
+def send_dashboard_page(handler: BaseHTTPRequestHandler, body: bytes) -> None:
+    send_response_body(
+        handler, HTTPStatus.OK, body, content_type="text/html; charset=utf-8",
+        no_store=True, headers={"X-Frame-Options": "DENY"},
+    )
 
 
 def read_json_object(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -5848,8 +5943,11 @@ def resolve_artifact_http_path(artifact_root: Path, request_path: str) -> Path |
     if not relative:
         return None
     decoded = urllib.parse.unquote(relative)
-    root = artifact_root.resolve()
-    candidate = (root / decoded).resolve()
+    try:
+        root = artifact_root.resolve()
+        candidate = (root / decoded).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
     if candidate == root or root not in candidate.parents:
         return None
     return candidate
@@ -5913,14 +6011,45 @@ def serve_artifact_path(handler: BaseHTTPRequestHandler, artifact_root: Path, pa
     except (FileNotFoundError, OSError):
         handler.send_error(HTTPStatus.NOT_FOUND)
         return True
+    relative = artifact_path.relative_to(artifact_root.resolve())
+    # Collected files are worker-controlled, including SVG, PDF and markup
+    # with unusual extensions. Generated reports and legacy wrappers are
+    # static previews, with sandboxing enforced even on direct navigation.
+    is_preview = (
+        relative == Path("library.json")
+        or (relative.parts[0] != "deliverables" and is_html_artifact(artifact_path))
+        or artifact_path.suffix.lower() in IMAGE_DELIVERABLE_SUFFIXES - {".svg"}
+    )
+    headers = {
+        "Content-Security-Policy": (
+            "sandbox allow-downloads; default-src 'none'; style-src 'unsafe-inline'; "
+            "img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+        ),
+    }
+    if not is_preview:
+        name = urllib.parse.quote(artifact_path.name, safe="")
+        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{name}"
     send_response_body(
         handler,
         HTTPStatus.OK,
         body,
-        content_type=artifact_content_type(artifact_path),
+        content_type=artifact_content_type(artifact_path) if is_preview else "application/octet-stream",
         no_store=True,
+        headers=headers,
     )
     return True
+
+
+def folder_opener() -> list[str]:
+    if sys.platform == "darwin":
+        opener = shutil.which("open")
+        return [opener] if opener else []
+    if sys.platform.startswith("linux"):
+        if opener := shutil.which("xdg-open"):
+            return [opener]
+        if opener := shutil.which("gio"):
+            return [opener, "open"]
+    return []
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -5957,19 +6086,10 @@ class PersistentHudServer:
         token = secrets.token_urlsafe(32)
 
         class Handler(BaseHTTPRequestHandler):
-            def request_allowed(self, path: str) -> bool:
-                if not loopback_host_allowed(self, server_ref.port):
-                    self.send_error(HTTPStatus.FORBIDDEN, "unexpected Host header")
-                    return False
-                if path.startswith("/api/") and not hud_token_matches(self, server_ref.token):
-                    self.send_error(HTTPStatus.UNAUTHORIZED, "missing or wrong HUD token")
-                    return False
-                return True
-
             def do_OPTIONS(self) -> None:  # noqa: N802
                 # CORS preflight for the native shell's token header and POST.
-                origin = self.headers.get("Origin", "")
-                if not loopback_host_allowed(self, server_ref.port) or origin not in NATIVE_HUD_ORIGINS:
+                origin = native_hud_origin(self)
+                if not loopback_host_allowed(self, server_ref.port) or origin is None:
                     self.send_error(HTTPStatus.FORBIDDEN)
                     return
                 self.send_response(HTTPStatus.NO_CONTENT)
@@ -5981,17 +6101,17 @@ class PersistentHudServer:
                 self.end_headers()
 
             def do_POST(self) -> None:  # noqa: N802
-                parsed = urllib.parse.urlparse(self.path)
                 if not loopback_host_allowed(self, server_ref.port):
                     self.send_error(HTTPStatus.FORBIDDEN, "unexpected Host header")
                     return
+                parsed = urllib.parse.urlparse(self.path)
                 if parsed.path != "/api/open-folder":
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
                 if not hud_origin_allowed(self, server_ref.port):
                     self.send_error(HTTPStatus.FORBIDDEN, "unexpected Origin")
                     return
-                if not self.request_allowed(parsed.path):
+                if not dashboard_private_request(self, server_ref.token):
                     return
                 self.open_folder(parsed.query)
 
@@ -6002,24 +6122,40 @@ class PersistentHudServer:
                 target = artifact_root_dir / "deliverables"
                 if run_id:
                     target = target / sanitize_artifact_name(run_id)
-                if not target.exists():
-                    target = artifact_root_dir
                 try:
                     resolved = target.resolve()
                     if resolved != artifact_root_dir and artifact_root_dir not in resolved.parents:
                         self.send_error(HTTPStatus.NOT_FOUND)
                         return
-                    if sys.platform == "darwin":
-                        subprocess.Popen(["open", str(resolved)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        send_response_body(self, HTTPStatus.NO_CONTENT, b"", content_type="text/plain; charset=utf-8", no_store=True)
-                    else:
+                    if not resolved.is_dir():
+                        resolved = artifact_root_dir
+                    opener = folder_opener()
+                    if not opener:
                         self.send_error(HTTPStatus.NOT_IMPLEMENTED)
-                except Exception:
+                        return
+                    subprocess.Popen(
+                        [*opener, str(resolved)], stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    send_response_body(
+                        self, HTTPStatus.NO_CONTENT, b"", content_type="text/plain; charset=utf-8", no_store=True,
+                    )
+                except (OSError, RuntimeError):
                     self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
 
             def do_GET(self) -> None:  # noqa: N802
+                if not loopback_host_allowed(self, server_ref.port):
+                    self.send_error(HTTPStatus.FORBIDDEN, "unexpected Host header")
+                    return
                 path = urllib.parse.urlparse(self.path).path
-                if not self.request_allowed(path):
+                if path == "/":
+                    send_dashboard_page(self, read_ringside_html().encode("utf-8"))
+                    return
+                if serve_artifact_frontend(self, path):
+                    return
+                if path.startswith(("/api/", "/artifacts/", "/logs/")) and not dashboard_private_request(
+                    self, server_ref.token,
+                ):
                     return
                 if path == "/api/viewer-ping":
                     server_ref.last_viewer_ping = time.monotonic()
@@ -6032,15 +6168,6 @@ class PersistentHudServer:
                     send_json_response(self, {
                         "seconds_since_viewer": None if last_ping is None else time.monotonic() - last_ping,
                     })
-                    return
-                if path == "/":
-                    body = inject_hud_token_into_html(read_ringside_html(), server_ref.token).encode("utf-8")
-                    send_response_body(
-                        self,
-                        HTTPStatus.OK,
-                        body,
-                        content_type="text/html; charset=utf-8",
-                    )
                     return
                 frontend_assets = {
                     "/ringside.css": (RINGSIDE_HTML_PATH.with_name("ringside.css"), "text/css; charset=utf-8"),
@@ -6066,6 +6193,7 @@ class PersistentHudServer:
                             "runs": scan_hud_run_states(state_dir),
                             "active": read_active_runs_file(),
                             "update": server_ref.update_status,
+                            "open_folder": bool(folder_opener()),
                         },
                     )
                     return
@@ -6141,14 +6269,23 @@ class PersistentHudServer:
         self.port = int(self.httpd.server_address[1])
         # Written only after the bind succeeds, so a failed second launch
         # cannot replace the token a running HUD is checking.
+        try:
+            write_hud_token(state_dir, token)
+        except OSError:
+            self.httpd.server_close()
+            self.httpd = None
+            self.port = None
+            raise
         self.token = token
-        write_hud_token(state_dir, token)
         self.thread = threading.Thread(target=self.httpd.serve_forever, name="ringer-hud", daemon=True)
         self.thread.start()
         url = f"http://127.0.0.1:{self.port}"
         if self.open_viewer:
-            with contextlib.suppress(Exception):
-                webbrowser.open(url)
+            try:
+                open_dashboard_browser(state_dir, self.port, token)
+            except OSError:
+                self.stop()
+                raise
         print(f"Ringside: {url}", flush=True)
         return self.port
 
@@ -6180,26 +6317,26 @@ class Dashboard:
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.port: int | None = None
+        self.token = ""
 
     def start(self) -> int:
         state_path = self.state_path
         artifact_root = state_path.parent.parent / "artifacts"
         dashboard_ref = self
+        self.token = secrets.token_urlsafe(32)
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
-                path = urllib.parse.urlparse(self.path).path
                 if not loopback_host_allowed(self, dashboard_ref.port):
                     self.send_error(HTTPStatus.FORBIDDEN, "unexpected Host header")
                     return
+                path = urllib.parse.urlparse(self.path).path
                 if path == "/":
-                    body = read_dashboard_html().encode("utf-8")
-                    send_response_body(
-                        self,
-                        HTTPStatus.OK,
-                        body,
-                        content_type="text/html; charset=utf-8",
-                    )
+                    send_dashboard_page(self, read_dashboard_html().encode("utf-8"))
+                    return
+                if serve_artifact_frontend(self, path):
+                    return
+                if not dashboard_private_request(self, dashboard_ref.token):
                     return
                 if path == "/state.json":
                     try:
@@ -6249,12 +6386,16 @@ class Dashboard:
             raise RuntimeError(f"could not start dashboard: {last_error}")
         self.thread = threading.Thread(target=self.httpd.serve_forever, name="ringer-dashboard", daemon=True)
         self.thread.start()
-        url = f"http://localhost:{self.port}"
+        url = f"http://127.0.0.1:{self.port}"
         # Browser-first: the persistent hud (ensure_hud_running, called from the
         # run path) is what the human watches. Only --browser opens this
         # per-run page directly; the parked Tauri app is never auto-launched.
         if self.open_viewer and self.force_browser:
-            open_in_browser(url)
+            try:
+                open_dashboard_browser(state_path.parent.parent, self.port, self.token)
+            except OSError:
+                self.stop()
+                raise
         # The persistent hud (:8700) is the one watch surface; this per-run
         # server is an internal state/log feed. Only advertise it when the
         # user explicitly chose the per-run page with --browser.
@@ -9144,12 +9285,26 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
 class Verifier:
     def __init__(self) -> None:
         self.log_paths: dict[str, Path] = {}
+        self.worktree_git: dict[str, tuple[Path, Path]] = {}
+
+    async def register_worktree(self, task: TaskSpec, taskdir: Path) -> None:
+        rc, timed_out, output = await run_bounded(
+            ["git", "rev-parse", "--path-format=absolute", "--absolute-git-dir", "--git-path", "objects"],
+            taskdir, CHECK_TIMEOUT_S,
+        )
+        paths = output.splitlines()
+        if timed_out or rc != 0 or len(paths) != 2 or not all(Path(path).is_absolute() for path in paths):
+            raise OSError(f"cannot pin worktree Git metadata: {output.strip()}")
+        metadata, objects = (Path(path).resolve(strict=True) for path in paths)
+        self.worktree_git[task.key] = (metadata, objects)
 
     async def verify(self, task: TaskSpec, taskdir: Path) -> VerifyResult:
-        check_returncode, check_timed_out, output = await self._run_check(task.check, taskdir, timeout_s=task.check_timeout_s, log_path=self.log_paths.get(task.key))
-        missing_files = tuple(
-            rel for rel in task.expect_files if not self._is_nonempty_file(self._expect_file_path(taskdir, rel))
+        check_returncode, check_timed_out, output = await self._run_check(
+            task.check, taskdir, timeout_s=task.check_timeout_s, log_path=self.log_paths.get(task.key),
+            inputs=task.check_read_paths, expected=task.expect_files,
+            worktree_git=self.worktree_git.get(task.key),
         )
+        missing_files = self._missing_expected_files(task, taskdir)
         ok = not missing_files and not check_timed_out and check_returncode == 0
         if missing_files:
             missing_message = f"[ringer] missing expected files: {', '.join(missing_files)}"
@@ -9171,11 +9326,20 @@ class Verifier:
         )
 
     @staticmethod
-    def _is_nonempty_file(path: Path) -> bool:
+    def _missing_expected_files(task: TaskSpec, taskdir: Path) -> tuple[str, ...]:
+        missing = []
         try:
-            return path.is_file() and path.stat().st_size > 0
-        except OSError:
-            return False
+            external = external_outputs(task.expect_files)
+            with open_directory(taskdir) as task_fd:
+                for value in task.expect_files:
+                    try:
+                        with open_expected(task_fd, value, external):
+                            pass
+                    except (OSError, ValueError, RuntimeError):
+                        missing.append(value)
+        except (OSError, ValueError, RuntimeError):
+            return task.expect_files
+        return tuple(missing)
 
     @staticmethod
     def _expect_file_path(taskdir: Path, path: str) -> Path:
@@ -9185,9 +9349,12 @@ class Verifier:
 
     @staticmethod
     async def _run_check(command: str, cwd: Path, timeout_s: float | None = None,
-                         log_path: Path | None = None) -> tuple[int | None, bool, str]:
+                         log_path: Path | None = None, *, inputs: tuple[str, ...] = (),
+                         expected: tuple[str, ...] = (), worktree_git: tuple[Path, Path] | None = None
+                         ) -> tuple[int | None, bool, str]:
         timeout_s = CHECK_TIMEOUT_S if timeout_s is None else timeout_s
-        rc, timed_out, output = await run_bounded(command, cwd, timeout_s, log_path)
+        rc, timed_out, output = await run_isolated_check(command, cwd, timeout_s, log_path,
+                                                        inputs=inputs, expected=expected, worktree_git=worktree_git)
         if timed_out:
             output += f"\n[ringer.py] check timed out after {timeout_s}s\n"
         return rc, timed_out, output
@@ -9638,76 +9805,79 @@ class RingerRunner:
     def _harvest_deliverables_on_pass(self, runtime: TaskRuntime) -> None:
         harvested: list[dict[str, Any]] = []
         notes: list[str] = []
-        target_dir = artifact_deliverables_dir(
-            self.config.state_dir,
-            self.run_id,
-            runtime.task.key,
-        )
-        expect_files: tuple[str, ...] = runtime.task.expect_files
-        worktree_task = self.manifest.worktrees and self.manifest.repo is not None
-        if not expect_files and not worktree_task:
-            # (In worktrees mode the taskdir root is a whole repo checkout —
-            # guessing there would harvest README.md and friends, not work.)
-            # No declared deliverables: rescue what the worker left at the
-            # top of its task directory, or the run's real output (a review,
-            # a report) never reaches the results page. Declaring
-            # expect_files remains the way to control exactly what is shown.
-            candidates = sorted(
-                path.name
-                for path in runtime.taskdir.glob("*")
-                if path.is_file()
-                and not path.name.startswith(".")
-                and path.suffix.lower() in FALLBACK_HARVEST_SUFFIXES
-            )
-            if len(candidates) > FALLBACK_HARVEST_MAX_FILES:
-                notes.append(
-                    f"Only the first {FALLBACK_HARVEST_MAX_FILES} of {len(candidates)} files were "
-                    "collected automatically; declare expect_files to choose exactly what is kept."
-                )
-                candidates = candidates[:FALLBACK_HARVEST_MAX_FILES]
-            expect_files = tuple(candidates)
         errors: list[str] = []
-        used_names: set[str] = set()
-        for expect_path in expect_files:
-            source = Verifier._expect_file_path(runtime.taskdir, expect_path)
-            try:
-                stat = source.stat()
-                if not source.is_file() or stat.st_size == 0:
-                    raise OSError("not a non-empty regular file")
-                if stat.st_size > DELIVERABLE_MAX_BYTES:
-                    raise OSError(f"larger than 20 MB ({stat.st_size:,} bytes)")
-                name = source.name
-                if name in used_names:
-                    name = hashlib.sha256(str(source).encode()).hexdigest()[:12] + "-" + name
-                used_names.add(name)
-                target = target_dir / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                source_hash = sha256_file(source)
-                shutil.copy2(source, target)
-                copied_size = target.stat().st_size
-                copied_hash = sha256_file(target)
-                if copied_hash != source_hash or copied_size != stat.st_size:
-                    raise OSError("export bytes differ from source")
-                harvested.append(dict(name=source.name, path=str(target), bytes=copied_size,
-                                      sha256=copied_hash, source_path=str(source), source_sha256=source_hash))
-            except OSError as exc:
-                error = f"deliverable export failed for {source}: {exc}"
-                errors.append(error)
-                append_text(runtime.log_path, f"[ringer.py] {error}\n")
+        target_dir = artifact_deliverables_dir(
+            self.config.state_dir, self.run_id, runtime.task.key
+        )
+        expect_files = runtime.task.expect_files
+        discover = not expect_files and not (self.manifest.worktrees and self.manifest.repo is not None)
+
+        def record_error(path: Path, exc: Exception) -> None:
+            error = f"deliverable export failed for {path}: {exc}"
+            errors.append(error)
+            with contextlib.suppress(OSError):
+                append_log(runtime.log_path, f"[ringer.py] {error}\n".encode())
+
+        try:
+            external = external_outputs(expect_files)
+            with open_directory(runtime.taskdir) as task_fd:
+                if discover:
+                    # Enumerate the pinned directory. Links and special files do
+                    # not count toward the automatic collection limit.
+                    with os.scandir(task_fd) as entries:
+                        candidates = sorted(
+                            entry.name for entry in entries
+                            if not entry.name.startswith(".")
+                            and Path(entry.name).suffix.lower() in FALLBACK_HARVEST_SUFFIXES
+                            and entry.is_file(follow_symlinks=False)
+                            and entry.stat(follow_symlinks=False).st_nlink == 1
+                        )
+                    if len(candidates) > FALLBACK_HARVEST_MAX_FILES:
+                        notes.append(
+                            f"Only the first {FALLBACK_HARVEST_MAX_FILES} of {len(candidates)} files "
+                            "were collected automatically; declare expect_files to choose what is kept."
+                        )
+                    expect_files = tuple(candidates[:FALLBACK_HARVEST_MAX_FILES])
+                if expect_files:
+                    self._export_deliverable_files(runtime, task_fd, expect_files, external,
+                                                   target_dir, harvested, record_error)
+        except (OSError, ValueError, RuntimeError) as exc:
+            record_error(runtime.taskdir, exc)
         runtime.deliverables = harvested
         runtime.deliverable_notes.extend(notes + errors)
         runtime.export_state = "NEEDS_CHANGE" if errors else ("PASS" if harvested else "UNKNOWN")
-        if harvested:
-            try:
-                atomic_write_json(target_dir / "harvest-manifest.json", {
+
+    def _export_deliverable_files(self, runtime, task_fd, expected, external, target_dir, harvested, record_error):
+        used_names = {"harvest-manifest.json"}
+        with open_directory(target_dir, create=True) as target_fd:
+            for value in expected:
+                source = runtime.taskdir / value
+                try:
+                    source = Verifier._expect_file_path(runtime.taskdir, value)
+                    with open_expected(task_fd, value, external) as (stream, info):
+                        name = source.name
+                        if name in used_names:
+                            prefix = hashlib.sha256(os.fsencode(source)).hexdigest()[:12]
+                            name = f"{prefix}-{source.name}"
+                            index = 2
+                            while name in used_names:
+                                name = f"{prefix}-{index}-{source.name}"
+                                index += 1
+                        size, digest = copy_output(stream, info, target_fd, name)
+                    used_names.add(name)
+                    harvested.append(dict(name=source.name, path=str(target_dir / name), bytes=size,
+                                          sha256=digest, source_path=str(source), source_sha256=digest))
+                except (OSError, ValueError, RuntimeError) as exc:
+                    record_error(source, exc)
+            if harvested:
+                manifest = {
                     "run_id": self.run_id, "job_id": self.manifest.job_id or self.manifest.run_name,
                     "task_key": runtime.task.key, "attempt_index": runtime.attempts,
                     "promotion_state": "BLOCKED", "check_sha256": hashlib.sha256(runtime.task.check.encode()).hexdigest(),
                     "files": harvested,
-                })
-            except OSError as exc:
-                runtime.export_state = "NEEDS_CHANGE"
-                runtime.deliverable_notes.append(f"harvest manifest failed: {exc}")
+                }
+                with atomic_output(target_fd, "harvest-manifest.json") as output:
+                    output.write((json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode())
 
     async def _prepare_taskdir(self, runtime: TaskRuntime) -> tuple[bool, str | None]:
         taskdir = runtime.taskdir
@@ -9752,6 +9922,10 @@ class RingerRunner:
                 message = stdout.decode("utf-8", errors="replace")
                 append_text(runtime.log_path, f"[ringer.py] git worktree add failed:\n{message}\n")
                 return False, message.strip() or "git worktree add failed"
+            try:
+                await self.verifier.register_worktree(runtime.task, taskdir)
+            except OSError as exc:
+                return False, str(exc)
             return True, None
         taskdir.mkdir(parents=True, exist_ok=True)
         return True, None
@@ -9779,22 +9953,21 @@ class RingerRunner:
 
     def _snapshot_worktree_reports(self, runtime: TaskRuntime) -> None:
         copied: dict[str, Path] = {}
-        report_dir = (runtime.log_path.parent / f"{runtime.log_path.stem}.reports").resolve()
-        for report_name in TASK_REPORT_FILENAMES:
-            source = runtime.taskdir / report_name
-            if not source.exists():
-                continue
-            target = report_dir / report_name
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-            except OSError as exc:
-                append_text(
-                    runtime.log_path,
-                    f"[ringer.py] report snapshot failed for {report_name}: {exc}\n",
-                )
-                continue
-            copied[report_name] = target
+        report_dir = runtime.log_path.parent / f"{runtime.log_path.stem}.reports"
+        try:
+            with open_directory(runtime.taskdir) as task_fd:
+                for report_name in TASK_REPORT_FILENAMES:
+                    try:
+                        with open_regular(task_fd, (report_name,)) as (source, info):
+                            with open_directory(report_dir, create=True) as target_fd:
+                                copy_output(source, info, target_fd, report_name)
+                        copied[report_name] = report_dir / report_name
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        runtime.deliverable_notes.append(f"report snapshot failed for {report_name}: {exc}")
+        except OSError as exc:
+            runtime.deliverable_notes.append(f"report snapshot failed: {exc}")
         if copied:
             with self.lock:
                 runtime.report_paths.update(copied)
@@ -9868,7 +10041,7 @@ class RingerRunner:
                 runtime.steering = steering_state
             with contextlib.suppress(Exception):
                 append_text(log_path, steering_line)
-        return cmd, command_spec
+        return prepare_worker_route(cmd, command_spec, engine, runtime.task, self.config), command_spec
 
     async def _run_worker(self, runtime: TaskRuntime, spec: str, attempt: int) -> WorkerResult:
         log_path = runtime.log_path
@@ -9897,6 +10070,9 @@ class RingerRunner:
                 ),
             )
         cmd, command_spec = runtime.prepared_command or self._prepare_worker_command(runtime, spec)
+        env = None
+        if is_native_codex_command(cmd, engine) and self._is_subscription_task(runtime.task):
+            env = codex_subscription_env()
         with self.lock:
             runtime.last_worker_command = list(cmd)
         display_cmd = [
@@ -9925,6 +10101,7 @@ class RingerRunner:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     cwd=str(runtime.taskdir),
+                    env=env,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
@@ -9952,11 +10129,8 @@ class RingerRunner:
                     with contextlib.suppress(asyncio.CancelledError):
                         await reader
                 self.active_processes.pop(proc.pid, None)
-                with log_path.open("rb") as usage_log:
-                    usage_log.seek(output_offset)
-                    runtime.billing.update(usage_evidence(usage_log.read().decode("utf-8", errors="replace"),
-                        runtime.task.model or engine.model_default, complete=False,
-                        service_tier=effective_service_tier_from_command(runtime.last_worker_command)))
+                self._record_worker_usage(runtime, engine, read_worker_output(log_path, output_offset),
+                                          complete=False)
                 runtime.current_worker = WorkerResult(proc.returncode, False,
                     parse_token_count(capture.text(), engine.token_regex), error="interrupted",
                     reported_model=parse_reported_model(capture.text(), engine.model_report_regex), raw_output=capture.text())
@@ -9984,25 +10158,14 @@ class RingerRunner:
                 with contextlib.suppress(asyncio.CancelledError):
                     await reader
                 self.active_processes.pop(proc.pid, None)
-                with log_path.open("rb") as usage_log:
-                    usage_log.seek(output_offset)
-                    runtime.billing.update(usage_evidence(usage_log.read().decode("utf-8", errors="replace"),
-                        runtime.task.model or engine.model_default, complete=False,
-                        service_tier=effective_service_tier_from_command(runtime.last_worker_command)))
+                self._record_worker_usage(runtime, engine, read_worker_output(log_path, output_offset),
+                                          complete=False)
                 raise
             self.active_processes.pop(proc.pid, None)
         output_tail = capture.text()
-        with log_path.open("rb") as usage_log:
-            usage_log.seek(output_offset)
-            attempt_output = usage_log.read().decode("utf-8", errors="replace")
-        usage = usage_evidence(attempt_output, runtime.task.model or engine.model_default,
-                               complete=output_complete and not timed_out and proc.returncode == 0,
-                               policy=runtime.admission.policy if runtime.admission else None,
-                               service_tier=effective_service_tier_from_command(runtime.last_worker_command))
-        if runtime.admission is not None:
-            settle_admission(runtime.admission, self.config.state_dir, usage)
-        else:
-            runtime.billing.update(usage)
+        attempt_output = read_worker_output(log_path, output_offset)
+        usage = self._record_worker_usage(runtime, engine, attempt_output,
+            complete=output_complete and not timed_out and proc.returncode == 0)
         tokens = usage.get("worker_tokens")
         if tokens is None:
             tokens = parse_token_count(attempt_output, engine.token_regex)
@@ -10017,6 +10180,19 @@ class RingerRunner:
             reported_model=reported_model,
             raw_output=output_tail,
         )
+
+    def _record_worker_usage(self, runtime: TaskRuntime, engine: EngineConfig,
+                             output: str, *, complete: bool) -> dict[str, Any]:
+        admission = runtime.admission
+        usage = usage_evidence(output, runtime.task.model or engine.model_default,
+                               complete=complete, policy=admission.policy if admission else None,
+                               service_tier=effective_service_tier_from_command(runtime.last_worker_command),
+                               openrouter_bounds=admission.openrouter_bounds if admission else None)
+        if admission is not None:
+            settle_admission(admission, self.config.state_dir, usage)
+        else:
+            runtime.billing.update(usage)
+        return usage
 
     async def _tee_stream(
         self,
@@ -10186,8 +10362,8 @@ class RingerRunner:
     def _task_runtime(self, task: TaskSpec) -> TaskRuntime:
         taskdir = self._taskdir(task)
         log_path = self._log_path(task, taskdir)
-        with contextlib.suppress(FileNotFoundError):
-            log_path.unlink()
+        with contextlib.suppress(FileNotFoundError), open_directory(log_path.parent) as parent:
+            os.unlink(log_path.name, dir_fd=parent)
         return TaskRuntime(
             task=task,
             taskdir=taskdir,
@@ -10196,9 +10372,10 @@ class RingerRunner:
         )
 
     def _taskdir(self, task: TaskSpec) -> Path:
-        taskdir = (self.manifest.workdir / task.key).resolve()
         workdir = self.manifest.workdir.resolve()
-        if taskdir != workdir and workdir not in taskdir.parents:
+        key = Path(task.key)
+        taskdir = workdir / key
+        if key.is_absolute() or not key.parts or ".." in key.parts:
             raise ValueError(f"task key escapes workdir: {task.key}")
         return taskdir
 
@@ -10431,8 +10608,7 @@ def _model_values_from_command(command: list[str]) -> list[str]:
     return values
 
 
-def _config_values_from_command(command: list[str], key: str) -> list[str]:
-    values: list[str] = []
+def _config_overrides_from_command(command: list[str]) -> list[str]:
     candidates: list[str] = []
     for index, item in enumerate(command):
         if item in {"-c", "--config"}:
@@ -10440,11 +10616,23 @@ def _config_values_from_command(command: list[str], key: str) -> list[str]:
         elif item.startswith("--config="):
             candidates.append(item.partition("=")[2])
         elif item.startswith("-c") and item != "-c":
-            candidates.append(item[2:])
+            candidates.append(item[2:].removeprefix("="))
+    return candidates
+
+
+def _config_values_from_command(command: list[str], key: str) -> list[str]:
+    values: list[str] = []
     pattern = re.compile(
         rf"(?:^|[,\s]){re.escape(key)}\s*=\s*[\"']?([^\"',\s]+)"
     )
-    for candidate in candidates:
+    for candidate in _config_overrides_from_command(command):
+        try:
+            parsed = tomllib.loads(candidate).get(key)
+        except tomllib.TOMLDecodeError:
+            parsed = None
+        if isinstance(parsed, str):
+            values.append(parsed)
+            continue
         match = pattern.search(candidate)
         if match:
             values.append(match.group(1).strip())
@@ -10478,6 +10666,49 @@ def _service_values_from_command(command: list[str]) -> list[str]:
         )
         for value in values
     ]
+
+
+def worker_service_values(command: list[str], spec: str, engine: EngineConfig) -> list[str]:
+    # Exclude the prompt slot without removing matching text from real options.
+    if engine.args_template[-1:] == ("{spec}",) and command[-1:] == [spec] and not spec.startswith("-"):
+        command = command[:-1]
+    return _service_values_from_command(command)
+
+
+def validate_worker_service(command: list[str], spec: str, engine: EngineConfig,
+                            task_key: str, config: AppConfig) -> None:
+    if not config.allow_fast_service:
+        require_permitted_service(worker_service_values(command, spec, engine), task_key)
+
+
+def is_native_codex_command(command: list[str], engine: EngineConfig) -> bool:
+    # A configured engine key can also point at a non-Codex local program.
+    return engine.name == DEFAULT_ENGINE_NAME and (
+        command[1:2] == ["exec"] or Path(engine.bin).name == DEFAULT_ENGINE_NAME)
+
+
+def prepare_worker_route(command: list[str], spec: str, engine: EngineConfig,
+                         task: TaskSpec, config: AppConfig) -> list[str]:
+    if not config.allow_fast_service:
+        values = worker_service_values(command, spec, engine)
+        require_permitted_service(values, task.key)
+        if not values and is_native_codex_command(command, engine) and command[-1:] == [spec]:
+            # Also override an inherited Fast default in the Codex config.
+            command = command[:-1] + ["-c", "service_tier=default"] + command[-1:]
+    if (config.billing_policy_path is None and task.billing_route != "api"
+            and is_native_codex_command(command, engine)):
+        # A policy governs admission. The native login restriction is required
+        # even without one, including for older tasks using the CLI's model.
+        command = enforce_codex_command(command, None, "subscription", spec)
+    return command
+
+
+def require_permitted_service(values: list[str], task_key: str) -> None:
+    if "fast" in values:
+        raise ModelAssessmentError(
+            f"task {task_key}: fast service is not authorised; set "
+            "allow_fast_service=true only after explicit paid-Fast authority"
+        )
 
 
 def _single_route_value(values: list[str], task_key: str, field: str) -> str:
@@ -10557,15 +10788,16 @@ def validate_manifest_model_assessment(
     config: AppConfig,
 ) -> dict[str, dict[str, str]]:
     """Resolve and validate every real task route before any side effect."""
-    if manifest.model_assessment is None and not config.require_model_assessment:
-        # Opt-in gate: an unassessed manifest keeps upstream behaviour unless
-        # config sets require_model_assessment; a supplied one is validated.
-        return {}
+    require_assessment = manifest.model_assessment is not None or config.require_model_assessment
     routes: list[ResolvedRoute] = []
     real_tasks: list[tuple[TaskSpec, EngineConfig]] = []
     for task in manifest.tasks:
         engine = config.engines.get(task.engine)
         if engine is None:
+            if not require_assessment:
+                # Automatic routing is resolved in preflight. Check its actual
+                # invocation there, along with all other prepared commands.
+                continue
             raise ModelAssessmentError(f"task {task.key}: unknown worker engine {task.engine!r}")
         base_command = build_worker_command(
             engine,
@@ -10576,6 +10808,9 @@ def validate_manifest_model_assessment(
             model=task.model,
         )
         if is_bundled_mock_command(base_command, task.spec):
+            continue
+        if not require_assessment:
+            validate_worker_service(base_command, task.spec, engine, task.key, config)
             continue
         real_tasks.append((task, engine))
     if not real_tasks:
@@ -10623,7 +10858,7 @@ def validate_manifest_model_assessment(
             resolved_effort = _single_route_value(
                 _effort_values_from_command(inspected), task.key, "effort"
             )
-        service_values = _service_values_from_command(inspected)
+        service_values = worker_service_values(command, task.spec, engine)
         if engine.name == DEFAULT_ENGINE_NAME:
             resolved_service = _single_route_value(
                 service_values, task.key, "service tier"
@@ -10650,12 +10885,8 @@ def validate_manifest_model_assessment(
         )
     validated = validate_model_assessment(manifest.model_assessment, routes)
     if not config.allow_fast_service:
-        fast_tasks = [route.task_key for route in routes if route.service_tier == "fast"]
-        if fast_tasks:
-            raise ModelAssessmentError(
-                f"task {fast_tasks[0]}: fast service is not authorised; set "
-                "allow_fast_service=true only after explicit paid-Fast authority"
-            )
+        for route in routes:
+            require_permitted_service([route.service_tier], route.task_key)
     return validated
 
 
@@ -11204,6 +11435,13 @@ async def run_baseline(manifest: Manifest, *, config: AppConfig) -> int:
             else:
                 taskdir.mkdir(parents=True, exist_ok=True)
             try:
+                if worktrees:
+                    try:
+                        await verifier.register_worktree(task, taskdir)
+                    except OSError as exc:
+                        errors += 1
+                        print(f"{task.key:<24} baseline: ERROR ({exc})")
+                        continue
                 verify = await verifier.verify(task, taskdir)
                 status = "pass" if verify.ok else "FAIL"
                 timed_out = ", timed out" if verify.check_timed_out else ""
@@ -11255,6 +11493,12 @@ async def run_baseline(manifest: Manifest, *, config: AppConfig) -> int:
         "against something no model can satisfy — fix the check before spawning."
     )
     return 0
+
+
+def read_worker_output(path: Path, offset: int) -> str:
+    with path.open("rb") as log:
+        log.seek(offset)
+        return log.read().decode("utf-8", errors="replace")
 
 
 def append_text(path: Path, text: str) -> None:
@@ -11340,6 +11584,8 @@ def dry_run(
             if engine is not None
             else []
         )
+        if engine is not None:
+            cmd = prepare_worker_route(cmd, task.spec, engine, task, config)
         print(f"  - {task.key}")
         print(f"    engine: {task.engine}")
         print(f"    dir: {taskdir}")
@@ -11493,7 +11739,7 @@ def create_demo_manifest(assessment_path: Path | None = None) -> Path:
             {
                 "key": "alpha",
                 "spec": "Create alpha.txt in the current working directory containing exactly one line: alpha ready\nEnd the file with exactly one newline. Do not add punctuation. Do not write any other files.",
-                "check": "printf 'alpha ready\\n' | diff -u - alpha.txt || { echo 'FAIL: alpha.txt must contain exactly alpha ready followed by one newline'; exit 1; }",
+                "check": "printf 'alpha ready\\n' | cmp -s - alpha.txt || { echo 'FAIL: alpha.txt must contain exactly alpha ready followed by one newline'; exit 1; }",
                 "verified": "alpha.txt exists and contains exactly alpha ready followed by one newline",
                 "expect_files": ["alpha.txt"],
                 "task_type": "probe",
@@ -11501,7 +11747,7 @@ def create_demo_manifest(assessment_path: Path | None = None) -> Path:
             {
                 "key": "bravo",
                 "spec": "Create bravo.txt in the current working directory containing exactly one line: bravo ready\nEnd the file with exactly one newline. Do not add punctuation. Do not write any other files.",
-                "check": "printf 'bravo ready\\n' | diff -u - bravo.txt || { echo 'FAIL: bravo.txt must contain exactly bravo ready followed by one newline'; exit 1; }",
+                "check": "printf 'bravo ready\\n' | cmp -s - bravo.txt || { echo 'FAIL: bravo.txt must contain exactly bravo ready followed by one newline'; exit 1; }",
                 "verified": "bravo.txt exists and contains exactly bravo ready followed by one newline",
                 "expect_files": ["bravo.txt"],
                 "task_type": "probe",
@@ -11509,7 +11755,7 @@ def create_demo_manifest(assessment_path: Path | None = None) -> Path:
             {
                 "key": "charlie",
                 "spec": "Create charlie.txt in the current working directory containing exactly one line: charlie ready\nEnd the file with exactly one newline. Do not add punctuation. Do not write any other files.",
-                "check": "printf 'charlie ready\\n' | diff -u - charlie.txt || { echo 'FAIL: charlie.txt must contain exactly charlie ready followed by one newline'; exit 1; }",
+                "check": "printf 'charlie ready\\n' | cmp -s - charlie.txt || { echo 'FAIL: charlie.txt must contain exactly charlie ready followed by one newline'; exit 1; }",
                 "verified": "charlie.txt exists and contains exactly charlie ready followed by one newline",
                 "expect_files": ["charlie.txt"],
                 "task_type": "probe",
@@ -12134,16 +12380,17 @@ async def run_manifest(
 def hud_api_request(port: int, path: str, state_dir: Path | None) -> str | urllib.request.Request:
     url = f"http://127.0.0.1:{port}{path}"
     token = read_hud_token(state_dir)
-    return urllib.request.Request(url, headers={HUD_TOKEN_HEADER: token}) if token else url
+    if not token:
+        return url
+    request = urllib.request.Request(url)
+    request.add_unredirected_header(HUD_TOKEN_HEADER, token)
+    return request
 
 
 def hud_is_alive(port: int, *, state_dir: Path | None = None) -> bool:
     try:
         with urllib.request.urlopen(hud_api_request(port, "/api/runs", state_dir), timeout=0.4) as response:
             return response.status == 200
-    except urllib.error.HTTPError as exc:
-        # A HUD that rejects our token is still running on the port.
-        return exc.code == HTTPStatus.UNAUTHORIZED
     except Exception:
         return False
 
@@ -12305,7 +12552,7 @@ def ensure_hud_running(config: AppConfig, *, open_browser: bool) -> None:
             time.sleep(0.15)
     if open_browser and not already_alive and hud_is_alive(port, state_dir=state_dir):
         if not (config.reuse_open_tab and hud_has_recent_viewer(port, state_dir=state_dir)):
-            open_in_browser(url)
+            open_dashboard_browser(state_dir, port, read_hud_token(state_dir))
     print(f"Ringside: {url}", flush=True)
 
 
@@ -12325,7 +12572,7 @@ def run_persistent_hud(
             return 0
         print(f"Ringside is already running: {url}")
         if open_viewer:
-            open_in_browser(url)
+            open_dashboard_browser(config.state_dir, chosen_port, read_hud_token(config.state_dir))
         return 0
     server = PersistentHudServer(
         config.state_dir,

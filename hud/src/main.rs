@@ -72,9 +72,38 @@ fn hud_server_url() -> String {
 /// This launch's HUD API token, which `ringer.py hud` writes next to its state.
 #[tauri::command]
 fn hud_server_token() -> String {
-    fs::read_to_string(load_state_dir().join("hud.token"))
-        .map(|token| token.trim().to_string())
-        .unwrap_or_default()
+    read_owner_token(&load_state_dir().join("hud.token")).unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn read_owner_token(path: &Path) -> Option<String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return None;
+    }
+    let mut value = String::new();
+    file.take(128).read_to_string(&mut value).ok()?;
+    let token = value.trim();
+    (token.len() == 43
+        && token
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
+    .then(|| token.to_string())
+}
+
+#[cfg(not(unix))]
+fn read_owner_token(_path: &Path) -> Option<String> {
+    None
 }
 
 #[tauri::command]
@@ -151,13 +180,9 @@ fn resize_main_window<R: Runtime>(
     Ok(())
 }
 
-/// Read a Tier 0 HTML artifact ringer.py rendered to disk for callers that need raw HTML.
-/// The Ringside artifact view loads artifact files through Tauri's asset protocol instead.
-/// Restricted to canonical paths under `<state_dir>/artifacts`.
-#[tauri::command]
-fn read_artifact_html(path: String) -> Result<String, String> {
+fn resolve_artifact_file(path: &str) -> Result<PathBuf, String> {
     let state_dir = load_state_dir();
-    let requested = expand_path(&path);
+    let requested = expand_path(path);
     let canonical_artifacts_dir = state_dir
         .join("artifacts")
         .canonicalize()
@@ -165,10 +190,32 @@ fn read_artifact_html(path: String) -> Result<String, String> {
     let canonical_requested = requested
         .canonicalize()
         .map_err(|err| format!("artifact not found: {err}"))?;
-    if !canonical_requested.starts_with(&canonical_artifacts_dir) {
+    if !canonical_requested.starts_with(&canonical_artifacts_dir) || !canonical_requested.is_file()
+    {
         return Err("refusing to read a path outside the artifact library".to_string());
     }
-    fs::read_to_string(canonical_requested).map_err(|err| err.to_string())
+    Ok(canonical_requested)
+}
+
+/// Read local report markup for the sandboxed preview, including saved versions.
+#[tauri::command]
+fn read_artifact_html(path: String) -> Result<String, String> {
+    fs::read_to_string(resolve_artifact_file(&path)?).map_err(|err| err.to_string())
+}
+
+/// Deliver bytes to the trusted UI for download without exposing a navigable file URL.
+#[tauri::command]
+fn read_artifact_file(path: String) -> Result<tauri::ipc::Response, String> {
+    const MAX_BYTES: u64 = 20 * 1024 * 1024;
+    let file = fs::File::open(resolve_artifact_file(&path)?).map_err(|err| err.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| err.to_string())?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("artifact exceeds the download size limit".to_string());
+    }
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -236,6 +283,7 @@ fn main() {
             resize_main_window,
             read_artifact_library,
             read_artifact_html,
+            read_artifact_file,
             read_worker_log,
             load_settings,
             save_settings

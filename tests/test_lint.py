@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -306,7 +307,11 @@ class LintManifestTests(unittest.TestCase):
         self.assertTrue(template_paths, "expected templates/*/manifest*.json files to exist")
         for path in template_paths:
             with self.subTest(template=path.name):
-                manifest = Manifest.from_path(path)
+                raw = path.read_text()
+                # The document kit grants its instantiated absolute paths to the verifier.
+                for name in ("REPO_PATH", "EXAMPLE_CWD", "KIT_DIR", "RINGER_CHECK_MODULE_DIR"):
+                    raw = raw.replace("{{" + name + "}}", str(ROOT))
+                manifest = Manifest.from_obj(json.loads(raw))
                 findings = lint_manifest(manifest)
                 self.assertEqual([], findings, f"{path} should lint clean, got: {findings}")
 

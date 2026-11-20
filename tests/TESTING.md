@@ -53,7 +53,7 @@ and logs. It launches no workers and never reads or modifies real run history.
 1. Run `RINGER_NO_SELF_UPDATE=1 python3 -m unittest discover -s tests -v`.
 2. Run `node tests/ringside_frontend_test.js` (Node is optional for the Python suite).
 3. Run `RINGER_NO_SELF_UPDATE=1 python3 tests/ringside_preview.py --port 8766`.
-4. Open the printed URL. Select the retrying task: its failed check must remain
+4. Open the printed `file://` launcher URL. Select the retrying task: its failed check must remain
    visible. Open logs, then return to the same task. Search for a task and switch
    runs. A stopped run must not show a worker as still working.
 5. Open its result, select a saved version, and wait through two refreshes. The
@@ -73,7 +73,7 @@ that action. The selected-folder route is covered with a mocked OS opener.
 
 Native build: `PATH="$HOME/.cargo/bin:$PATH" cargo tauri build --bundles app`
 from `hud/`. The sync script must byte-copy `dashboard/ringside.html`,
-`ringside.css`, `ringside.js`, assets, and `hud/frontend/hud.js` into `hud/dist/`.
+`ringside.css`, `ringside.js`, `artifact-preview.js`, assets, and `hud/frontend/hud.js` into `hud/dist/`.
 Compare the release binary to the bundle executable. The shared frontend's native
 transport/compact behavior has Node coverage; the native app was built, not
 interactively launched (the browser is Ringer's primary operator interface).

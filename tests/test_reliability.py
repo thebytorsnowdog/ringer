@@ -297,7 +297,7 @@ class ExtendedReliabilityTests(ReliabilityTests):
 
     def test_failed_harvest_is_export_failure_and_keeps_product_evidence(self):
         runner = self.runner()
-        with patch.object(ringer.shutil, "copy2", side_effect=OSError("export disk unavailable")):
+        with patch.object(ringer, "copy_output", side_effect=OSError("export disk unavailable")):
             self.assertEqual(1, asyncio.run(runner.run()))
         self.assertEqual(1, len(self.rows()))
         row = self.rows()[0]
@@ -372,8 +372,8 @@ args_template = ["-c", "echo worker-raw; echo yes > out.txt", "fixture-shell", "
 sandbox_args = []
 full_access_args = []
 ''')
-        marker = self.root / "child.pid"
-        check = f"echo checker-raw; sleep 30 & echo $! > {shlex.quote(str(marker))}; wait"
+        marker = self.root / "work/active/worker.log"
+        check = "echo checker-raw; sleep 30 & wait"
         manifest = self.root / "manifest.json"
         raw_manifest = dict(
             run_name="cancel-check",
@@ -417,10 +417,24 @@ full_access_args = []
         child = None
         try:
             deadline = time.monotonic()+4
-            while time.monotonic() < deadline and not marker.exists():
-                time.sleep(.01)
-            self.assertTrue(marker.exists())
-            child = int(marker.read_text())
+            while time.monotonic() < deadline:
+                if marker.exists() and "checker-raw" in marker.read_text():
+                    listing = subprocess.check_output(["ps", "-eo", "pid=,ppid=,comm="], text=True)
+                    processes = [row.strip().split(None, 2) for row in listing.splitlines()]
+                    parents = {int(pid): int(ppid) for pid, ppid, _ in processes}
+                    for pid, _, command in processes:
+                        if Path(command).name != "sleep":
+                            continue
+                        ancestor = int(pid)
+                        while ancestor in parents and ancestor != proc.pid:
+                            ancestor = parents[ancestor]
+                        if ancestor == proc.pid:
+                            child = int(pid)
+                            break
+                    if child is not None:
+                        break
+                time.sleep(.02)
+            self.assertIsNotNone(child, "checker child never started")
             proc.send_signal(signal.SIGTERM)
             stdout, _ = proc.communicate(timeout=4)
         finally:
@@ -448,16 +462,25 @@ full_access_args = []
         self.assertEqual(1, report["totals"]["interruptions"])
 
     def test_checker_ignoring_term_is_killed_with_bounded_stdout_drain(self):
-        marker = self.root / "checker.pid"
-        command = f"trap '' TERM; echo $$ > {shlex.quote(str(marker))}; echo resistant-checker; while :; do sleep 1; done"
+        command = "trap '' TERM; echo resistant-checker; while :; do sleep 1; done"
         start = time.monotonic()
-        rc, timed_out, output = asyncio.run(ringer.Verifier._run_check(command, self.root, timeout_s=.08))
+        processes = []
+        spawn = asyncio.create_subprocess_exec
+
+        async def observed_spawn(*args, **kwargs):
+            proc = await spawn(*args, **kwargs)
+            processes.append(proc)
+            return proc
+
+        with patch.object(asyncio, "create_subprocess_exec", observed_spawn):
+            rc, timed_out, output = asyncio.run(ringer.Verifier._run_check(command, self.root, timeout_s=.5))
         self.assertTrue(timed_out)
-        self.assertLess(time.monotonic()-start, 3)
+        self.assertLess(time.monotonic()-start, 4)
         self.assertNotEqual(0, rc)
         self.assertIn("resistant-checker", output)
+        self.assertEqual(len(processes), 1)
         with self.assertRaises(ProcessLookupError):
-            os.kill(int(marker.read_text()), 0)
+            os.killpg(processes[0].pid, 0)
 
     def test_false_pass_is_not_counted_as_successful_delivery(self):
         from ringer_reliability import read_outcomes

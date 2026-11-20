@@ -9730,7 +9730,9 @@ class RingerRunner:
                         runtime.failure_class = runtime.billing["billing_failure_class"]
                         reason = str(runtime.billing.get("billing_reason") or "billing blocked")
                         if runtime.failure_class == "quota":
-                            reason = self._stop_quota(runtime, "Subscription quota blocked billing admission")
+                            notice = ("Billing allowance unavailable" if "allowance unavailable" in reason
+                                      else "Quota blocked billing admission")
+                            reason = self._stop_quota(runtime, notice)
                         runtime.setup_error = reason
                         self._event(runtime, "billing_blocked")
                         self._terminal(runtime, "blocked", "BLOCKED")

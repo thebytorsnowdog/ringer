@@ -129,6 +129,10 @@ def _mac_command(command, scratch, read_mounts):
         params.extend(("-D", f"{key}={runtime}"))
         profile.append(f'(allow file-read* file-map-executable (subpath (param "{key}")))')
         directories.add(runtime)
+    framework = Path(sys.base_prefix).resolve() / "Python"
+    if framework.is_file() and "Python.framework" in framework.parts:
+        params.extend(("-D", f"PYTHON_FRAMEWORK={framework}"))
+        profile.append('(allow file-read* file-map-executable (literal (param "PYTHON_FRAMEWORK")))')
     for index, (path, fd) in enumerate(read_mounts):
         key = f"INPUT_{index}"
         match = "subpath" if stat.S_ISDIR(os.fstat(fd).st_mode) else "literal"

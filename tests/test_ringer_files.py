@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 import ringer
 from ringer_file_scope import copy_output, open_directory, open_regular
-from ringer_reliability import read_export_evidence
+from ringer_reliability import _mac_output_operands, read_export_evidence
 
 
 class FileScopeTests(unittest.TestCase):
@@ -132,6 +132,17 @@ class FileScopeTests(unittest.TestCase):
 
 
 class VerificationScopeTests(unittest.TestCase):
+    def test_mac_export_maps_only_declared_operands(self):
+        target = Path("/example/folder with spaces/export.txt")
+        mirror = Path("/private/tmp/staging/folder with spaces/export.txt")
+        other = str(target) + ".old"
+        outputs = [(target, mirror)]
+        args = ["cmp", str(target), other]
+        self.assertEqual(["cmp", str(mirror), other], _mac_output_operands(args, outputs))
+        command = f'mkdir -p "{target.parent}"; cat {shlex.quote(other)} > {shlex.quote(str(target))}'
+        expected = f"mkdir -p {shlex.quote(str(mirror.parent))}; cat {shlex.quote(other)} > {shlex.quote(str(mirror))}"
+        self.assertEqual(expected, _mac_output_operands(command, outputs))
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="ringer fixture ")
         self.addCleanup(tmp.cleanup)

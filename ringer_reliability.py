@@ -539,6 +539,29 @@ def _prepare_external_outputs(externals: set[Path], scratch: Path):
     return prefixes, outputs
 
 
+def _mac_output_operands(command, outputs):
+    """Translate literal output files or their directory operands into the private mirror."""
+    operands = {}
+    for path, mirror in outputs:
+        for src, dst in ((path, mirror), (path.parent, mirror.parent)):
+            operands[str(src)] = str(dst)
+            operands[str(Path("/", *absolute_parts(src)))] = str(dst)
+    if not operands:
+        return command
+    if isinstance(command, list):
+        return [operands.get(arg, arg) for arg in command]
+    spellings = {}
+    for src, dst in operands.items():
+        spellings[shlex.quote(src)] = shlex.quote(dst)
+        if not any(ch in src for ch in ('"', '$', chr(92), chr(96))):
+            spellings['"' + src + '"'] = shlex.quote(dst)
+        if "'" not in src:
+            spellings["'" + src + "'"] = shlex.quote(dst)
+    keys = "|".join(re.escape(key) for key in sorted(spellings, key=len, reverse=True))
+    pattern = rf"(?<![^\s;<>&|()])(?:{keys})(?![^\s;<>&|()])"
+    return re.sub(pattern, lambda match: spellings[match[0]], command)
+
+
 def _snapshot_worktree_git(snapshot: Path, metadata: Path, objects: Path) -> None:
     # Use the coordinator's pre-worker Git paths. The task's .git marker can
     # never grant additional host paths or access to the real repository index.
@@ -557,9 +580,9 @@ def _snapshot_worktree_git(snapshot: Path, metadata: Path, objects: Path) -> Non
                     raise
 
 
-def mac_doc_check(command, cwd, snapshot, grants):
-    """Run the bundled document reader directly. Each example gets its own Seatbelt process."""
-    if sys.platform != "darwin":
+def bundled_doc_check(command, cwd, snapshot, grants):
+    """The bundled reader runs each example inside a fresh native sandbox."""
+    if not isinstance(command, str):
         return None
     try:
         argv = shlex.split(command)
@@ -622,24 +645,24 @@ async def run_isolated_check(command: str | list[str], cwd: Path, timeout: float
                 for path in sorted(paths):
                     if not path.is_relative_to(cwd):
                         mounts.append((path, stack.enter_context(open_input(path))))
-                output_mounts, external_files = ([], [])
-                if sys.platform == "linux":
-                    # An explicit read-only grant takes precedence over the
-                    # writable view for outputs beneath that same input.
-                    writable = {path for path in externals if not any(path.is_relative_to(item) for item in paths)}
-                    output_mounts, external_files = _prepare_external_outputs(writable, scratch)
-                else:
-                    for path in sorted(externals - paths):
+                # Read-only inputs take precedence over external output declarations.
+                writable = {path for path in externals if not any(path.is_relative_to(item) for item in paths)}
+                output_mounts, external_files = _prepare_external_outputs(writable, scratch)
+                doc = bundled_doc_check(command, cwd, snapshot, paths | externals)
+                if sys.platform == "darwin":
+                    # Seatbelt has no bind mounts. Redirect declared path operands into
+                    # staging and retain read access to any previously published file.
+                    command = _mac_output_operands(command, external_files)
+                    for path in sorted(writable):
                         with contextlib.suppress(FileNotFoundError):
                             mounts.append((path, stack.enter_context(open_input(path))))
                 external_before = {
                     (path, parts): _output_signature(scratch_fd, parts)
                     for path, mirror in external_files for parts in (mirror.relative_to(scratch).parts,)
                 }
-                doc = mac_doc_check(command, cwd, snapshot, paths | externals)
                 if doc is not None:
-                    # macOS refuses nested Seatbelt profiles. Only our fixed Python reader
-                    # takes this path. Worker-authored code runs in run_example's sandbox.
+                    # Seatbelt and some Linux hosts prohibit nested sandboxes. This fixed
+                    # reader opens inputs through descriptors and isolates each example.
                     result = await run_bounded(doc, snapshot, timeout, log_path,
                                                env=sandbox_environment(scratch))
                 else:

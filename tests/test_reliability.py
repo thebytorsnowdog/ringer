@@ -242,9 +242,13 @@ class ExtendedReliabilityTests(ReliabilityTests):
         from ringer_reliability import preflight_local
         taskdir = self.root / "probe"
         taskdir.mkdir()
-        with patch("ringer_reliability.tempfile.mkstemp", side_effect=PermissionError("permission denied")):
-            with self.assertRaises(PermissionError):
-                preflight_local(runner.runtimes[0].task, taskdir)
+        taskdir.chmod(0o555)
+        try:
+            if os.geteuid() != 0:
+                with self.assertRaises(PermissionError):
+                    preflight_local(runner.runtimes[0].task, taskdir)
+        finally:
+            taskdir.chmod(0o700)
         async def denied_probe(*args, **kwargs):
             return 0, False, json.dumps(["permission", "permission denied"])
         with patch.object(ringer, "run_bounded", denied_probe):

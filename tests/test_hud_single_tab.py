@@ -86,7 +86,7 @@ class HudSingleTabTests(unittest.TestCase):
                 ringer.open_in_browser = original_open
                 ringer.subprocess.Popen = original_popen
             self.assertEqual(1, len(spawned))
-            self.assertEqual([(hud_config.state_dir / "browser-8700.html").as_uri()], opened)
+            self.assertEqual([(hud_config.state_dir / "browser-8700.html").resolve().as_uri()], opened)
 
 
 if __name__ == "__main__":

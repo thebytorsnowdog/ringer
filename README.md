@@ -128,6 +128,8 @@ Each task gets its own directory, its own worker, its own log, and its own verdi
 
 Checks use a fresh copy of the task directory and a minimal environment with networking disabled. Declare checker inputs in `check_read_paths`, install runtimes in the system tool directories or grant their paths explicitly, and direct build products into the verification workspace. Ringer publishes declared outputs created or updated by a passing check. On Linux, an absolute output can also be written by the check through a private copy of its output directory. On macOS, write check-generated outputs to task-relative paths. Linux requires bubblewrap and libseccomp. macOS requires Seatbelt through `sandbox-exec`. If the native sandbox cannot start, verification fails.
 
+On macOS, pass external export destinations as literal path arguments or shell operands so Ringer can stage them privately and publish them after the check succeeds. System sandboxing restricts writes to the staged files.
+
 On PASS, Ringer collects declared deliverables before removing a task worktree. Worker logs for worktree tasks live in `workdir/logs/`.
 
 Not sure what your tasks even are yet? [`docs/interview-prompt.md`](docs/interview-prompt.md) is a prompt you paste into any chatbot; it interviews you about the job and hands back a brief your orchestrating agent can turn into a manifest. Ready-made skeletons for the patterns that work live in [`templates/`](templates/).

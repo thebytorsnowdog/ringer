@@ -58,7 +58,7 @@ class MemoryServer:
 
 class BrowserDashboardTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.state = self.root / "runs" / "saved-run.json"
         self.state.parent.mkdir()
         self.log = self.root / "worker.log"

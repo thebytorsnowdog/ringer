@@ -5790,8 +5790,25 @@ def hud_token_path(state_dir: Path) -> Path:
     return state_dir / HUD_TOKEN_FILE_NAME
 
 
+def protect_default_state(state_dir: Path) -> None:
+    """Keep the standard per-user run history private, including pre-upgrade data."""
+    if state_dir != default_state_dir() or state_dir.is_symlink():
+        return
+    state_dir.mkdir(mode=0o700, exist_ok=True)
+    fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.geteuid():
+            raise PermissionError("Ringer state directory has a different owner")
+        if info.st_mode & 0o077:
+            os.fchmod(fd, stat.S_IMODE(info.st_mode) & ~0o077)
+    finally:
+        os.close(fd)
+
+
 def write_hud_token(state_dir: Path, token: str) -> None:
     """Leave this launch's token where the CLI and the native shell can read it (owner-only)."""
+    protect_default_state(state_dir)
     write_owner_file(hud_token_path(state_dir), token)
 
 
@@ -9370,6 +9387,7 @@ class RingerRunner:
         force_browser: bool = False,
     ) -> None:
         self.manifest = manifest
+        protect_default_state(config.state_dir)
         self.config = config
         self.identity = identity
         self.dashboard_enabled = dashboard_enabled

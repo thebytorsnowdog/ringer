@@ -355,7 +355,13 @@ class LifecycleJournal:
         identity = [payload[k] for k in ("run_id", "job_id", "task_key", "attempt_index", "event")]
         event_id = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a+b") as stream:
+        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+        with os.fdopen(os.open(self.path, flags, 0o600), "a+b") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                raise PermissionError("Lifecycle journal must be an owner-controlled regular file")
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                os.fchmod(stream.fileno(), 0o600)
             fcntl.flock(stream, fcntl.LOCK_EX)
             self._scan_new_bytes(stream)
             if event_id in self._seen:

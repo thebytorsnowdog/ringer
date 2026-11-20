@@ -162,6 +162,14 @@ class BrowserDashboardTests(unittest.TestCase):
             self.assertNotIn("allow-same-origin", policy)
             self.assertNotIn("allow-scripts", policy)
 
+    def test_startup_protects_existing_default_run_history(self):
+        private = self.root / "old-state"
+        private.mkdir()
+        private.chmod(0o755)
+        with patch.object(ringer, "default_state_dir", return_value=private):
+            ringer.write_hud_token(private, "d" * 43)
+        self.assertEqual(0o700, private.stat().st_mode & 0o777)
+
     def test_linux_open_folder_requires_session_and_known_origin(self) -> None:
         server, http = self.start(True)
         origin = "http://127.0.0.1:8700"

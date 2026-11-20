@@ -95,9 +95,12 @@ class ExtendedReliabilityTests(ReliabilityTests):
         journal = LifecycleJournal(path)
         row = dict(run_id="r", job_id="j", task_key="t", attempt_index=1, event="attempt_started", status="running")
         event_id = journal.append(row)
+        self.assertEqual(0o600, path.stat().st_mode & 0o777)
+        path.chmod(0o644)
         original = path.read_bytes()
         self.assertEqual(event_id, journal.append(dict(row, status="changed")))
         self.assertEqual(original, path.read_bytes())
+        self.assertEqual(0o600, path.stat().st_mode & 0o777)
         with path.open("ab") as stream:
             stream.write(b'{"torn":')
         journal.append(dict(row, event="attempt_finished"))

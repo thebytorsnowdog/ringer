@@ -192,6 +192,18 @@ class QuotaFallbackTests(unittest.TestCase):
                 self.assertNotIn("usage cap fallbacks", out_buf.getvalue())
                 self.assertFalse(self.notify_log.exists())
 
+    def test_cap_notice_uses_structured_facts_only(self):
+        usage = {"windows": [{"label": "fictional label", "percent": 1.0,
+                              "resetsAt": "fictional invalid reset"}]}
+        path = self.usage_dir / "codex.json"
+        path.write_text(json.dumps(usage))
+        self.assertEqual((True, "Subscription window at 100%"),
+                         ringer.check_subscription_quota_cap("codex", usage_dir=self.usage_dir))
+        usage["windows"][0]["resetsAt"] = "2099-01-01T00:00:00Z"
+        path.write_text(json.dumps(usage))
+        self.assertEqual((True, "Subscription window at 100% (resets 2099-01-01T00:00:00+00:00)"),
+                         ringer.check_subscription_quota_cap("codex", usage_dir=self.usage_dir))
+
     def test_pre_dispatch_usage_cap_reverts_immediately_without_wasting_attempt(self):
         usage_file = self.usage_dir / "antigravity.json"
         usage_file.write_text(

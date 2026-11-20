@@ -249,7 +249,7 @@ const data = {
     env.el("task-inspector").innerHTML,
     /&lt;script&gt;bad\(\)&lt;\/script&gt;/,
   );
-  assert.doesNotMatch(env.el("task-inspector").innerHTML, /<script>/);
+  assert.doesNotMatch(env.el("task-inspector").innerHTML, /<script\b/i);
   env.input("search", "auth");
   assert.doesNotMatch(env.el("task-table").innerHTML, /data-task="redirect"/);
   assert.match(env.el("task-table").innerHTML, /data-task="auth"/);

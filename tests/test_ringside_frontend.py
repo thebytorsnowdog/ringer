@@ -46,7 +46,9 @@ class RingsideFrontendTests(unittest.TestCase):
         if os.name == "posix":
             self.assertEqual(0o600, token_path.stat().st_mode & 0o777)
         with urlopen(self.base + "/", timeout=5) as response:
-            self.assertIn(f'<meta name="ringer-token" content="{self.server.token}"', response.read().decode("utf-8"))
+            page = response.read().decode("utf-8")
+            self.assertNotIn(self.server.token, page)
+            self.assertNotIn(ringer.dashboard_browser_token(self.server.token), page)
         second = ringer.PersistentHudServer(self.root, preferred_port=0, open_viewer=False)
         second.start()
         self.addCleanup(second.stop)
@@ -70,7 +72,7 @@ class RingsideFrontendTests(unittest.TestCase):
 
     def test_open_folder_is_a_post_from_a_known_origin(self) -> None:
         port = self.base.rsplit(":", 1)[1]
-        with patch.object(ringer.sys,"platform","darwin"), patch.object(ringer.subprocess,"Popen") as popen:
+        with patch.object(ringer, "folder_opener", return_value=["/fixture/open"]), patch.object(ringer.subprocess,"Popen") as popen:
             self.assertEqual(405, self.status("/api/open-folder", headers=self.token))
             self.assertEqual(403, self.status("/api/open-folder", method="POST", headers=self.token))
             self.assertEqual(403, self.status("/api/open-folder", method="POST", headers={"Origin": "https://untrusted.example", **self.token}))
@@ -94,7 +96,8 @@ class RingsideFrontendTests(unittest.TestCase):
             port = dashboard.start()
         self.addCleanup(dashboard.stop)
         base = f"http://127.0.0.1:{port}"
-        with urlopen(base + "/state.json", timeout=5) as response:
+        headers = {ringer.HUD_TOKEN_HEADER: dashboard.token}
+        with urlopen(Request(base + "/state.json", headers=headers), timeout=5) as response:
             self.assertEqual(200, response.status)
         with self.assertRaises(HTTPError) as caught:
             urlopen(Request(base + "/state.json", headers={"Host": f"evil.example:{port}"}), timeout=5)
@@ -102,7 +105,7 @@ class RingsideFrontendTests(unittest.TestCase):
         self.assertEqual(403, caught.exception.code)
 
     def test_shared_resources_and_native_origin_are_allowlisted(self) -> None:
-        for path, content_type in [("/ringside.js","text/javascript"),("/ringside.css","text/css"),("/hud.js","text/javascript"),("/assets/ringside-mark.svg","image/svg+xml")]:
+        for path, content_type in [("/ringside.js","text/javascript"),("/ringside.css","text/css"),("/hud.js","text/javascript"),("/artifact-preview.js","text/javascript"),("/assets/ringside-mark.svg","image/svg+xml")]:
             with urlopen(self.base+path, timeout=5) as response:
                 self.assertTrue(response.headers["Content-Type"].startswith(content_type))
                 self.assertGreater(len(response.read()), 20)
@@ -116,11 +119,11 @@ class RingsideFrontendTests(unittest.TestCase):
     def test_open_folder_uses_selected_version_run(self) -> None:
         directory = self.root / "artifacts" / "deliverables" / "saved-run"
         directory.mkdir(parents=True)
-        with patch.object(ringer.sys,"platform","darwin"), patch.object(ringer.subprocess,"Popen") as popen:
+        with patch.object(ringer, "folder_opener", return_value=["/fixture/open"]), patch.object(ringer.subprocess,"Popen") as popen:
             with urlopen(Request(self.base+"/api/open-folder?artifact=Release&run=saved-run", headers={"Origin":"tauri://localhost", **self.token}, method="POST"), timeout=5) as response:
                 self.assertEqual(204,response.status)
                 self.assertEqual("tauri://localhost",response.headers.get("Access-Control-Allow-Origin"))
-            self.assertEqual(["open",str(directory.resolve())],popen.call_args.args[0])
+            self.assertEqual(["/fixture/open",str(directory.resolve())],popen.call_args.args[0])
 
     @unittest.skipUnless(shutil.which("node"), "Node is optional; run the browser recipe in TESTING.md")
     def test_frontend_behavior_without_dependencies(self) -> None:

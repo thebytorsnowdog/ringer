@@ -23,18 +23,9 @@
     return null;
   };
   const bridge = window.ringsideNative;
-  // The HUD wants this launch's token on /api/*: the page gets it in a meta
-  // tag, the native shell reads the token file the HUD writes.
-  const hudToken = Promise.resolve(
-    bridge
-      ? bridge.serverToken
-      : document.querySelector('meta[name="ringer-token"]')?.content,
-  ).then(
-    (token) => token || "",
-    () => "",
-  );
-  async function apiHeaders(path) {
-    const token = path.startsWith("/api/") ? await hudToken : "";
+  const preview = window.ringerArtifactPreview;
+  async function apiHeaders() {
+    const token = await bridge.serverToken();
     return token ? { "X-Ringer-Token": token } : {};
   }
   const state = {
@@ -52,6 +43,7 @@
     taskType: "",
     runError: "",
     libraryError: "",
+    openFolder: false,
     modelError: "",
     updated: 0,
     logKey: "",
@@ -407,10 +399,9 @@
     const pieces = relative.split("/").filter(Boolean);
     if (pieces.includes("..") || pieces.includes(".") || path.includes("\0"))
       return "";
-    if (version)
-      return pieces.length
-        ? "/artifacts/" + pieces.map(encodeURIComponent).join("/")
-        : "";
+    if (pieces.length && (index >= 0 || path.startsWith("artifacts/") || version))
+      return "/artifacts/" + pieces.map(encodeURIComponent).join("/");
+    if (version) return "";
     return `/artifacts/live/${encodeURIComponent(sanitize(a.name))}.html`;
   }
   function renderOutputs() {
@@ -455,7 +446,7 @@
         : "",
     );
     $("artifact-version").value = state.version;
-    $("open-folder").disabled = !a;
+    $("open-folder").disabled = !a || !state.openFolder;
     $("preview-note").textContent = a
       ? state.version === "live" && a.state === "live"
         ? "Live preview · automatic refresh"
@@ -488,43 +479,29 @@
     if (key === state.frameKey && (v || a.state !== "live")) return;
     const generation = ++state.frameGeneration;
     try {
+      const path = v?.path || a.live_path;
       const raw = bridge
-        ? await bridge.readArtifact(v?.path || a.live_path)
+        ? await bridge.readArtifact(path)
         : await request(href, "text");
       if (generation !== state.frameGeneration) return;
-      // Preserve the existing local-artifact viewer: resolve deliverable links,
-      // suppress standalone meta-refresh, and update live content in place.
-      const baseHref = bridge
-        ? bridge.artifactURL(v?.path || a.live_path)
-        : new URL(href, window.location.href).href;
-      const base = `<base href="${esc(baseHref)}" target="_blank">`;
-      let html = raw.replace(
-        /<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi,
-        "",
-      );
-      html = /<head\b/i.test(html)
-        ? html.replace(/<head([^>]*)>/i, `<head$1>${base}`)
-        : `${base}${html}`;
-      if (key === state.frameKey && html === state.frameContent) return;
-      const current = $("frame-wrap").querySelector("iframe");
-      if (key === state.frameKey && current?.contentDocument?.documentElement) {
-        try {
-          morphPreview(
-            current.contentDocument.documentElement,
-            new DOMParser().parseFromString(html, "text/html").documentElement,
-          );
-          state.frameContent = html;
-          return;
-        } catch (_) {
-          /* recover with a fresh frame */
-        }
-      }
-      state.frameKey = key;
-      state.frameContent = html;
-      const iframe = document.createElement("iframe");
+      if (key === state.frameKey && raw === state.frameContent) return;
+      const iframe = (key === state.frameKey && $("frame-wrap").querySelector("iframe"))
+        || document.createElement("iframe");
+      const source = bridge ? preview.fileURL(path) : new URL(href, window.location.href);
       iframe.title = `${a.name} output preview`;
-      iframe.srcdoc = html;
-      $("frame-wrap").replaceChildren(iframe);
+      preview.render(iframe, raw, source, (url) => {
+        if (bridge) {
+          preview.downloadFile(bridge.readArtifactFile, url).catch((error) => {
+            $("library-error").hidden = false;
+            $("library-error").textContent = `Could not download the output: ${error.message}`;
+          });
+        } else {
+          preview.openBrowserLink(url);
+        }
+      });
+      if (iframe.parentNode !== $("frame-wrap")) $("frame-wrap").replaceChildren(iframe);
+      state.frameKey = key;
+      state.frameContent = raw;
     } catch (error) {
       if (generation !== state.frameGeneration) return;
       state.frameKey = "";
@@ -533,58 +510,6 @@
         `<p class="empty">Could not load this output: ${esc(error.message)}. It will retry on the next refresh.</p>`,
       );
     }
-  }
-  // Same-origin local output documents have always been executable previews.
-  // Retain their DOM nodes so scripts, scroll position and disclosures survive polling.
-  function morphPreview(have, want) {
-    if (have.nodeType === 1) {
-      for (const name of have.getAttributeNames())
-        if (
-          !(name === "open" && have.tagName === "DETAILS") &&
-          !want.hasAttribute(name)
-        )
-          have.removeAttribute(name);
-      for (const name of want.getAttributeNames())
-        if (
-          !(name === "open" && have.tagName === "DETAILS") &&
-          have.getAttribute(name) !== want.getAttribute(name)
-        )
-          have.setAttribute(name, want.getAttribute(name));
-    }
-    const old = [...have.childNodes],
-      keyed = new Map(
-        old
-          .filter((n) => n.nodeType === 1 && n.getAttribute("data-key"))
-          .map((n) => [n.getAttribute("data-key"), n]),
-      );
-    let position = 0;
-    const desired = [...want.childNodes].map((w) => {
-      const key = w.nodeType === 1 ? w.getAttribute("data-key") : null;
-      let h = key ? keyed.get(key) : null;
-      if (!key)
-        while (position < old.length) {
-          const candidate = old[position++];
-          if (candidate.nodeType === 1 && candidate.getAttribute("data-key"))
-            continue;
-          h = candidate;
-          break;
-        }
-      if (
-        !h ||
-        h.nodeType !== w.nodeType ||
-        (h.nodeType === 1 && h.tagName !== w.tagName)
-      )
-        return w;
-      if (h.nodeType === 3 || h.nodeType === 8) {
-        if (h.nodeValue !== w.nodeValue) h.nodeValue = w.nodeValue;
-      } else if (h.nodeType === 1) morphPreview(h, w);
-      return h;
-    });
-    desired.forEach((node, i) => {
-      if (have.childNodes[i] !== node)
-        have.insertBefore(node, have.childNodes[i] || null);
-    });
-    while (have.childNodes.length > desired.length) have.lastChild.remove();
   }
   function renderModels() {
     const rows = state.taskType
@@ -645,15 +570,25 @@
         .join(""),
     );
   }
-  async function request(path, type = "json") {
-    if (!path || !path.startsWith("/"))
+  async function fetchLocal(path, options) {
+    if (!path || !path.startsWith("/") || path.startsWith("//"))
       throw new Error("Invalid local resource");
-    const base = bridge ? await bridge.serverURL : "";
-    const response = await fetch(base + path, {
+    if (!bridge) return preview.browserFetch(path, options);
+    return fetch((await bridge.serverURL) + path, {
+      ...options,
       cache: "no-store",
-      headers: await apiHeaders(path),
+      credentials: "omit",
+      redirect: "error",
+      headers: await apiHeaders(),
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  }
+  async function request(path, type = "json") {
+    const response = await fetchLocal(path);
+    if (!response.ok) {
+      throw new Error(response.status === 401 && !bridge
+        ? "Open Ringside with ringer.py hud --force-open"
+        : `HTTP ${response.status}`);
+    }
     return type === "text" ? response.text() : response.json();
   }
   async function poll(name, operation) {
@@ -676,6 +611,8 @@
       try {
         const payload = await request("/api/runs");
         state.hudRunsAvailable = true;
+        state.openFolder = payload.open_folder === true;
+        $("open-folder").disabled = !artifact() || !state.openFolder;
         applyRuns(payload);
         const update = payload.update;
         const k = JSON.stringify(update);
@@ -693,6 +630,8 @@
         };
       } catch (error) {
         state.hudRunsAvailable = false;
+        state.openFolder = false;
+        $("open-folder").disabled = true;
         if (bridge && state.nativeRuns !== null) {
           applyRuns(state.nativeRuns);
         } else if (!bridge) {
@@ -863,13 +802,12 @@
   };
   $("open-folder").onclick = async () => {
     const a = artifact();
-    if (!a) return;
+    if (!a || !state.openFolder) return;
     const v = a.versions.find((v) => v.key === state.version);
     try {
-      const base = bridge ? await bridge.serverURL : "";
-      const response = await fetch(
-        `${base}/api/open-folder?artifact=${encodeURIComponent(a.name)}&run=${encodeURIComponent(v?.run_id || a.current_run_id || "")}`,
-        { method: "POST", headers: await apiHeaders("/api/open-folder") },
+      const response = await fetchLocal(
+        `/api/open-folder?run=${encodeURIComponent(v?.run_id || a.current_run_id || "")}`,
+        { method: "POST" },
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       $("library-error").hidden = true;
@@ -906,6 +844,11 @@
   showView("runs");
   fetchRuns();
   fetchLibrary();
+  if (!bridge) {
+    const pingViewer = () => fetchLocal("/api/viewer-ping").catch(() => {});
+    pingViewer();
+    setInterval(pingViewer, 5000);
+  }
   setInterval(() => {
     $("clock").textContent = new Date().toLocaleTimeString([], {
       hour: "2-digit",

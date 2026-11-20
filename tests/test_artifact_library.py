@@ -10,7 +10,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -249,27 +249,28 @@ class ArtifactLibraryTests(unittest.TestCase):
         )
         port = dashboard.start()
         self.addCleanup(dashboard.stop)
+        headers = {ringer.HUD_TOKEN_HEADER: dashboard.token}
 
-        with urlopen(f"http://127.0.0.1:{port}/artifacts/library.json", timeout=5) as response:
+        with urlopen(Request(f"http://127.0.0.1:{port}/artifacts/library.json", headers=headers), timeout=5) as response:
             self.assertEqual(200, response.status)
             self.assertEqual("application/json; charset=utf-8", response.headers["Content-Type"])
             body = json.loads(response.read().decode("utf-8"))
         self.assertIn("Library Run", body["artifacts"])
 
         artifact_rel = writer.live_path.relative_to(self.state_dir / "artifacts")
-        with urlopen(f"http://127.0.0.1:{port}/artifacts/{artifact_rel.as_posix()}", timeout=5) as response:
+        with urlopen(Request(f"http://127.0.0.1:{port}/artifacts/{artifact_rel.as_posix()}", headers=headers), timeout=5) as response:
             self.assertEqual(200, response.status)
             self.assertEqual("text/html; charset=utf-8", response.headers["Content-Type"])
             self.assertIn(b"Library Run", response.read())
 
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         self.addCleanup(conn.close)
-        conn.request("GET", "/artifacts/%2e%2e/runs/run-1.json")
+        conn.request("GET", "/artifacts/%2e%2e/runs/run-1.json", headers=headers)
         escape_response = conn.getresponse()
         self.assertEqual(404, escape_response.status)
         escape_response.read()
 
-        conn.request("GET", "/artifacts/live/")
+        conn.request("GET", "/artifacts/live/", headers=headers)
         listing_response = conn.getresponse()
         self.assertEqual(404, listing_response.status)
         listing_response.read()

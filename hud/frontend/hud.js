@@ -6,10 +6,10 @@
   let listener = null;
   window.ringsideNative = {
     serverURL: invoke("hud_server_url"),
-    serverToken: invoke("hud_server_token").catch(() => ""),
+    serverToken: () => invoke("hud_server_token").catch(() => ""),
     readLibrary: () => invoke("read_artifact_library"),
     readArtifact: (path) => invoke("read_artifact_html", { path }),
-    artifactURL: (path) => tauri.core.convertFileSrc(path),
+    readArtifactFile: (path) => invoke("read_artifact_file", { path }),
     readLog: (path) => invoke("read_worker_log", { path }),
     resize: (width, height) => invoke("resize_main_window", { width, height }),
     hide: () => invoke("hide_window"),

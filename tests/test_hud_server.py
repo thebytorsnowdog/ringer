@@ -148,7 +148,7 @@ class PersistentHudServerTests(unittest.TestCase):
             library_body = json.loads(response.read().decode("utf-8"))
         self.assertEqual("live", library_body["artifacts"]["Live Run"]["state"])
 
-        with urlopen(f"{base}/artifacts/live.html", timeout=5) as response:
+        with urlopen(api_request(self.state_dir, f"{base}/artifacts/live.html"), timeout=5) as response:
             self.assertEqual(200, response.status)
             self.assertEqual("text/html; charset=utf-8", response.headers["Content-Type"])
             self.assertEqual("no-store", response.headers["Cache-Control"])
@@ -156,12 +156,13 @@ class PersistentHudServerTests(unittest.TestCase):
 
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         self.addCleanup(conn.close)
-        conn.request("GET", "/artifacts/%2e%2e/runs/live-run.json")
+        headers = {ringer.HUD_TOKEN_HEADER: _server.token}
+        conn.request("GET", "/artifacts/%2e%2e/runs/live-run.json", headers=headers)
         escape_response = conn.getresponse()
         self.assertEqual(404, escape_response.status)
         escape_response.read()
 
-        with urlopen(f"{base}/logs/live-run/alpha", timeout=5) as response:
+        with urlopen(api_request(self.state_dir, f"{base}/logs/live-run/alpha"), timeout=5) as response:
             self.assertEqual(200, response.status)
             self.assertEqual("text/plain; charset=utf-8", response.headers["Content-Type"])
             self.assertEqual("no-store", response.headers["Cache-Control"])
@@ -169,12 +170,12 @@ class PersistentHudServerTests(unittest.TestCase):
         self.assertEqual(self.log_tail, log_body)
         self.assertNotIn("old-prefix", log_body)
 
-        conn.request("GET", "/logs/live-run/unknown")
+        conn.request("GET", "/logs/live-run/unknown", headers=headers)
         unknown_task = conn.getresponse()
         self.assertEqual(404, unknown_task.status)
         unknown_task.read()
 
-        conn.request("GET", "/logs/unknown-run/alpha")
+        conn.request("GET", "/logs/unknown-run/alpha", headers=headers)
         unknown_run = conn.getresponse()
         self.assertEqual(404, unknown_run.status)
         unknown_run.read()

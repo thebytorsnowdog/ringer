@@ -252,7 +252,7 @@ class DeliverableTests(unittest.TestCase):
         task = TaskSpec(
             key="task-one",
             spec="from pathlib import Path; Path('site-final.html').write_text('<h1>done</h1>\\n')",
-            check=f"{sys.executable!s} -c {json.dumps(check_code)}",
+            check=f"python3 -c {json.dumps(check_code)}",
             engine="mock",
             expect_files=("site-final.html",),
         )

@@ -499,8 +499,9 @@ def _month(value: Any) -> str:
 class SpendLedger:
     """Atomic monthly/per-run allowance reservations, not provider hard caps.
 
-    A reservation's amount/month/run never changes. Actual overspend is retained
-    and blocks further reservations for that month. Unknown settlement stays held.
+    A reservation's amount/month/run never changes. Actual overspend and
+    validated token overruns each block further dispatch in that month.
+    Unknown settlement stays held.
     """
     def __init__(self, state_dir: Path):
         self.path = Path(state_dir) / "cost-reservations.json"
@@ -530,12 +531,15 @@ class SpendLedger:
             raise ValueError("invalid reservation ledger schema; preserve and reconcile manually")
         fields = {"amount_gbp", "month", "state", "run_id", "started", "actual_gbp", "overspend", "settlement_source", "release_evidence"}
         for identity, row in data["reservations"].items():
-            if not _text(identity) or not isinstance(row, dict) or set(row) != fields:
+            if not _text(identity) or not isinstance(row, dict) or set(row) - {"token_bound_exceeded"} != fields:
                 raise ValueError("invalid reservation record")
             amount = _decimal(row["amount_gbp"], "reservation", positive=True)
             _month(row["month"])
             if row["state"] not in {"reserved", "settled", "released"} or type(row["started"]) is not bool or type(row["overspend"]) is not bool:
                 raise ValueError("invalid reservation state")
+            overrun = row.get("token_bound_exceeded", False)
+            if type(overrun) is not bool or (overrun and not row["started"]):
+                raise ValueError("invalid token bound evidence")
             if row["run_id"] is not None and not _text(row["run_id"]):
                 raise ValueError("invalid run_id")
             if row["state"] == "settled":
@@ -606,13 +610,13 @@ class SpendLedger:
         with self._locked() as data:
             rows = data["reservations"]
             existing = rows.get(attempt_id)
-            overspent = any(row["month"] == month and row["overspend"] for row in rows.values())
+            stopped = self._dispatch_stopped(rows, month)
             if existing is not None:
                 if Decimal(existing["amount_gbp"]) != amount or existing["month"] != month or existing["run_id"] != run_id:
                     raise ValueError("attempt ID conflicts with original amount/month/run")
-                return existing["state"] == "reserved" and not existing["started"] and not overspent
+                return existing["state"] == "reserved" and not existing["started"] and not stopped
             active = [row for row in rows.values() if row["month"] == month and row["state"] != "released"]
-            if overspent:
+            if stopped:
                 return False
             def cost(row: dict[str, Any]) -> Decimal:
                 return Decimal(row["actual_gbp"] if row["state"] == "settled" else row["amount_gbp"])
@@ -625,15 +629,28 @@ class SpendLedger:
                                 "overspend": False, "settlement_source": None, "release_evidence": None}
             return True
 
+    @staticmethod
+    def _dispatch_stopped(rows: dict[str, Any], month: str) -> bool:
+        return any(row["month"] == month and (row["overspend"] or row.get("token_bound_exceeded", False))
+                   for row in rows.values())
+
     def mark_started(self, attempt_id: str) -> bool:
         with self._locked() as data:
-            row = data["reservations"].get(attempt_id)
+            rows = data["reservations"]
+            row = rows.get(attempt_id)
             if row is None or row["state"] != "reserved" or row["started"]:
                 return False
-            if any(item["month"] == row["month"] and item["overspend"]
-                                          for item in data["reservations"].values()):
+            if self._dispatch_stopped(rows, row["month"]):
                 return False
             row["started"] = True
+            return True
+
+    def record_token_overrun(self, attempt_id: str) -> bool:
+        with self._locked() as data:
+            row = data["reservations"].get(attempt_id)
+            if row is None or not row["started"]:
+                return False
+            row["token_bound_exceeded"] = True
             return True
 
     def settle(self, attempt_id: str, actual_gbp: Any, *, source: str = "caller-attested-provider-actual") -> bool:
@@ -717,7 +734,7 @@ def billing_preflight(*, engine: str, model: str | None, policy: Any,
         if not SpendLedger(state_dir).reserve(attempt_id, allowance, p["monthly_api_cap_gbp"],
                                               month or (now or datetime.now(timezone.utc)).strftime("%Y-%m"),
                                               run_id=run_id, run_cap_gbp=p.get("run_api_cap_gbp")):
-            return BillingDecision(False, "allowance unavailable, terminal reservation or recorded overspend", route)
+            return BillingDecision(False, "allowance unavailable, terminal reservation, recorded overspend or token bound overrun", route)
         return BillingDecision(True, "explicit API allowance reserved; not a provider hard cap", route, attempt_id)
     except (ValueError, TypeError, OSError) as exc:
         return BillingDecision(False, f"billing evidence invalid: {exc}", route)

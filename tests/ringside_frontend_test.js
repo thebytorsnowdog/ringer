@@ -67,12 +67,7 @@ function environment(payload, native = false, token = "") {
   });
   const document = {
     getElementById: el,
-    querySelector: (selector) =>
-      selector === 'meta[name="ringer-token"]'
-        ? native || !token
-          ? null
-          : { content: token }
-        : el(selector),
+    querySelector: el,
     querySelectorAll: () => views,
     addEventListener: (name, fn) => {
       docEvents[name] = fn;
@@ -84,10 +79,9 @@ function environment(payload, native = false, token = "") {
     ? {
         ringsideNative: {
           serverURL: Promise.resolve("http://127.0.0.1:9876"),
-          ...(token ? { serverToken: Promise.resolve(token) } : {}),
+          serverToken: async () => token,
           readLibrary: async () => JSON.stringify(payload["/api/library"]),
           readArtifact: async () => "native preview",
-          artifactURL: () => "http://asset.localhost/preview",
           readLog: async () => "native log",
           resize: async (w, h) => calls.push([w, h]),
           hide() {},
@@ -97,6 +91,29 @@ function environment(payload, native = false, token = "") {
         },
       }
     : { location: { href: "http://127.0.0.1:9876/" } };
+  const request = async (url, init = {}) => {
+    calls.push(url);
+    requests.push({ url: String(url), init });
+    const resource = String(url).replace(/^http:\/\/127\.0\.0\.1:9876/, "").split("?")[0];
+    const value = payload[resource];
+    if (value instanceof Error) throw value;
+    return {
+      ok: value !== undefined,
+      status: value === undefined ? 404 : 200,
+      json: async () => value,
+      text: async () => String(value),
+    };
+  };
+  window.ringerArtifactPreview = {
+    browserFetch: (url, init) => request(url, {
+      ...init, headers: token ? { "X-Ringer-Token": token } : {},
+    }),
+    fileURL: (path) => new URL(path, "file:///"),
+    render: (frame, content, source) => {
+      frame.srcdoc = content;
+      frame.previewSource = source.href;
+    },
+  };
   vm.runInNewContext(
     source,
     {
@@ -105,19 +122,7 @@ function environment(payload, native = false, token = "") {
       URL,
       localStorage: { getItem: () => null, setItem() {} },
       setInterval: (fn, ms) => timers.push({ fn, ms }),
-      fetch: async (url, init = {}) => {
-        calls.push(url);
-        requests.push({ url: String(url), init });
-        const resource = String(url).replace(/^http:\/\/127\.0\.0\.1:9876/, "");
-        const value = payload[resource];
-        if (value instanceof Error) throw value;
-        return {
-          ok: value !== undefined,
-          status: value === undefined ? 404 : 200,
-          json: async () => value,
-          text: async () => String(value),
-        };
-      },
+      fetch: request,
       console,
       Date,
       Map,
@@ -271,9 +276,9 @@ const data = {
   env.change("artifact-version", "/tmp/artifacts/versions/release-v1.html");
   await settle();
   assert.match(env.el("frame-wrap").children[0].srcdoc, /saved version/);
-  assert.match(
-    env.el("frame-wrap").children[0].srcdoc,
-    /base href="http:\/\/127\.0\.0\.1:9876\/artifacts\/versions\/release-v1.html" target="_blank"/,
+  assert.equal(
+    env.el("frame-wrap").children[0].previewSource,
+    "http://127.0.0.1:9876/artifacts/versions/release-v1.html",
   );
   env.timers.find((t) => t.ms === 2000).fn();
   await settle();
@@ -335,6 +340,7 @@ const data = {
   const tokenOf = (request) => request.init.headers?.["X-Ringer-Token"];
   assert.ok(empty.requests.every((request) => tokenOf(request) === undefined));
   data["/api/open-folder"] = "";
+  data["/api/runs"].open_folder = true;
   for (const [label, client] of [
     ["page", environment(data, false, "page-token")],
     ["native", environment(data, true, "native-token")],
@@ -344,12 +350,22 @@ const data = {
     const api = client.requests.filter((r) => /\/api\//.test(r.url));
     assert.ok(api.length > 0, label);
     assert.ok(api.every((r) => tokenOf(r) === expected), label);
+    if (label === "page") {
+      const ping = api.find((r) => r.url === "/api/viewer-ping");
+      assert.equal(tokenOf(ping), expected);
+    }
     client.click({ output: "Release" });
     await settle();
+    assert.equal(client.el("open-folder").disabled, false, label);
     await client.el("open-folder").onclick();
     const open = client.requests.find((r) => r.url.includes("/api/open-folder"));
     assert.equal(open?.init.method, "POST", label);
     assert.equal(tokenOf(open), expected, label);
+    data["/api/runs"].open_folder = false;
+    client.timers.find((t) => t.ms === 1000).fn();
+    await settle();
+    assert.equal(client.el("open-folder").disabled, true, label);
+    data["/api/runs"].open_folder = true;
   }
   console.log(
     "PASS: retry evidence, escaping, task search, raw logs, model filtering, dead workers, saved versions, reconnect, native compact/expand, empty states, HUD token and POST open-folder",

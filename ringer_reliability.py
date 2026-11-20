@@ -9,14 +9,23 @@ import json
 import math
 import os
 import re
+import secrets
 import shlex
 import signal
+import stat
+import sys
 import tempfile
 import tomllib
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from ringer_check_sandbox import SandboxUnavailable, sandbox_command, sandbox_environment
+from ringer_file_scope import (
+    absolute_parts, append_log, copy_output, descend, external_outputs, open_directory, open_input, open_regular,
+    relative_parts,
+)
 
 FAILURE_CLASSES = frozenset({"product", "checker_timeout", "worker_timeout", "missing_dependency",
                              "missing_checker", "export", "provider/runtime", "quota", "permission",
@@ -46,11 +55,14 @@ def reliability_fields(obj: dict[str, Any], key: str) -> dict[str, Any]:
         if not isinstance(value, str) or (name in obj and not value.strip()):
             raise ValueError(f"task {key}: {name} must be a non-empty string")
         values[name] = value
-    for name in ("preflight_files", "preflight_write_paths", "preflight_python_modules", "retry_classes"):
+    for name in ("preflight_files", "preflight_write_paths", "preflight_python_modules", "retry_classes", "check_read_paths"):
         value = obj.get(name, [])
         if not isinstance(value, list) or any(not isinstance(v, str) or not v.strip() for v in value):
             raise ValueError(f"task {key}: {name} must be a list of non-empty strings")
         values[name] = tuple(value)
+    if any(not Path(name).expanduser().is_absolute() or ".." in Path(name).parts
+           for name in values["check_read_paths"]):
+        raise ValueError(f"task {key}: check_read_paths must contain absolute paths without parent traversal")
     if values["preflight_python_modules"] and not values["preflight_python"]:
         raise ValueError(f"task {key}: preflight_python is required with preflight_python_modules")
     if any(not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", v) for v in values["preflight_python_modules"]):
@@ -269,6 +281,8 @@ def classify_failure(worker: Any, verify: Any, *, worker_output: str = "", expor
         return "worker_timeout"
     if verify.check_timed_out:
         return "checker_timeout"
+    if verify.check_returncode == 126 and verify.raw_output_excerpt.startswith("[ringer] isolated verification failed:"):
+        return "missing_dependency"
     if export_error:
         return "export"
     worker_failed = bool(worker.error) or worker.returncode not in (0, None)
@@ -341,7 +355,13 @@ class LifecycleJournal:
         identity = [payload[k] for k in ("run_id", "job_id", "task_key", "attempt_index", "event")]
         event_id = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a+b") as stream:
+        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+        with os.fdopen(os.open(self.path, flags, 0o600), "a+b") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                raise PermissionError("Lifecycle journal must be an owner-controlled regular file")
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                os.fchmod(stream.fileno(), 0o600)
             fcntl.flock(stream, fcntl.LOCK_EX)
             self._scan_new_bytes(stream)
             if event_id in self._seen:
@@ -401,9 +421,10 @@ async def stop_process_tree(proc: asyncio.subprocess.Process) -> None:
         await asyncio.wait_for(proc.wait(), 1)
 
 
-async def run_bounded(command: str | list[str], cwd: Path, timeout: float, log_path: Path | None = None) -> tuple[int | None, bool, str]:
+async def run_bounded(command: str | list[str], cwd: Path, timeout: float, log_path: Path | None = None,
+                      *, env: dict[str, str] | None = None, pass_fds: tuple[int, ...] = ()) -> tuple[int | None, bool, str]:
     kwargs = dict(cwd=str(cwd), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                  stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+                  stderr=asyncio.subprocess.STDOUT, start_new_session=True, env=env, pass_fds=pass_fds)
     if isinstance(command, str):
         proc = await asyncio.create_subprocess_shell(command, **kwargs)
     else:
@@ -415,8 +436,7 @@ async def run_bounded(command: str | list[str], cwd: Path, timeout: float, log_p
             if len(capture) > 1_000_000:
                 del capture[:-1_000_000]
             if log_path is not None:
-                with log_path.open("ab") as stream:
-                    stream.write(chunk)
+                append_log(log_path, chunk)
     async def finish():
         await drain()
         await proc.wait()
@@ -439,6 +459,240 @@ async def run_bounded(command: str | list[str], cwd: Path, timeout: float, log_p
             with contextlib.suppress(asyncio.CancelledError):
                 await reader
     return proc.returncode, timed_out, capture.decode("utf-8", errors="replace")
+
+
+def _snapshot_task(root: int, destination: Path, *, top: bool = True) -> None:
+    with os.scandir(root) as entries:
+        for entry in entries:
+            name = entry.name
+            if name == ".runtime" or (top and name == "worker.log"):
+                continue
+            target = destination / name
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                target.mkdir()
+                with descend(root, (name,)) as child:
+                    _snapshot_task(child, target, top=False)
+            elif stat.S_ISLNK(info.st_mode):
+                target.symlink_to(os.readlink(name, dir_fd=root))
+            elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                with open_regular(root, (name,), nonempty=False) as (source, opened):
+                    _copy_snapshot_file(source, opened, target)
+
+
+def _copy_snapshot_file(source, info: os.stat_result, target: Path) -> None:
+    remaining = info.st_size
+    with target.open("xb") as out:
+        while remaining:
+            chunk = source.read(min(remaining, 128 * 1024))
+            if not chunk:
+                raise OSError(f"file changed during verification snapshot: {target.name}")
+            out.write(chunk)
+            remaining -= len(chunk)
+    if os.fstat(source.fileno()).st_ctime_ns != info.st_ctime_ns:
+        raise OSError(f"file changed during verification snapshot: {target.name}")
+    target.chmod(info.st_mode & 0o777)
+    os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+
+def _output_signature(root: int, parts: tuple[str, ...]) -> tuple[int, int] | None:
+    try:
+        with open_regular(root, parts, nonempty=False) as (_, info):
+            return info.st_ino, info.st_ctime_ns
+    except OSError:
+        return None
+
+
+def _publish_check_outputs(snapshot: int, task: int, original: dict[tuple[str, ...], tuple[int, int] | None]) -> None:
+    for parts, before in original.items():
+        after = _output_signature(snapshot, parts)
+        if after is None:
+            if before is not None:
+                raise OSError(f"check removed or replaced expected output: {Path(*parts)}")
+            continue
+        if after != before:
+            with open_regular(snapshot, parts) as (source, info), descend(task, parts[:-1], create=True) as parent:
+                _publish_one_output(source, info, parent, parts[-1])
+
+
+def _publish_one_output(source, info: os.stat_result, parent: int, name: str) -> None:
+    try:
+        with open_regular(parent, (name,), nonempty=False):
+            pass
+    except FileNotFoundError:
+        pass
+    copy_output(source, info, parent, name, mode=info.st_mode & 0o777)
+
+
+def _prepare_external_outputs(externals: set[Path], scratch: Path):
+    """Create a private view with only the exact external files in the contract."""
+    prefixes = []
+    outputs = []
+    for path in sorted(externals, key=lambda item: (len(item.parts), item)):
+        parts = absolute_parts(path)
+        if len(parts) < 2:
+            raise SandboxUnavailable(f"external output needs a dedicated parent directory: {path}")
+        mirror = scratch.joinpath("external", *parts)
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        if not any(prefix == path.parent or prefix in path.parents for prefix, _ in prefixes):
+            prefixes.append((path.parent, mirror.parent))
+        try:
+            with open_directory(path.parent) as parent, open_regular(parent, (path.name,), nonempty=False) as (source, info):
+                _copy_snapshot_file(source, info, mirror)
+        except FileNotFoundError:
+            pass
+        outputs.append((path, mirror))
+    return prefixes, outputs
+
+
+def _mac_output_operands(command, outputs):
+    """Translate literal output files or their directory operands into the private mirror."""
+    operands = {}
+    for path, mirror in outputs:
+        for src, dst in ((path, mirror), (path.parent, mirror.parent)):
+            operands[str(src)] = str(dst)
+            operands[str(Path("/", *absolute_parts(src)))] = str(dst)
+    if not operands:
+        return command
+    if isinstance(command, list):
+        return [operands.get(arg, arg) for arg in command]
+    spellings = {}
+    for src, dst in operands.items():
+        spellings[shlex.quote(src)] = shlex.quote(dst)
+        if not any(ch in src for ch in ('"', '$', chr(92), chr(96))):
+            spellings['"' + src + '"'] = shlex.quote(dst)
+        if "'" not in src:
+            spellings["'" + src + "'"] = shlex.quote(dst)
+    keys = "|".join(re.escape(key) for key in sorted(spellings, key=len, reverse=True))
+    pattern = rf"(?<![^\s;<>&|()])(?:{keys})(?![^\s;<>&|()])"
+    return re.sub(pattern, lambda match: spellings[match[0]], command)
+
+
+def _snapshot_worktree_git(snapshot: Path, metadata: Path, objects: Path) -> None:
+    # Use the coordinator's pre-worker Git paths. The task's .git marker can
+    # never grant additional host paths or access to the real repository index.
+    git = snapshot / ".git"
+    git.unlink()
+    (git / "objects" / "info").mkdir(parents=True)
+    (git / "refs").mkdir()
+    (git / "objects" / "info" / "alternates").write_text(str(objects) + "\n", encoding="utf-8")
+    with open_directory(metadata) as admin:
+        for name in ("HEAD", "index"):
+            try:
+                with open_regular(admin, (name,)) as (source, info):
+                    _copy_snapshot_file(source, info, git / name)
+            except FileNotFoundError:
+                if name == "HEAD":
+                    raise
+
+
+def bundled_doc_check(command, cwd, snapshot, grants):
+    """The bundled reader runs each example inside a fresh native sandbox."""
+    if not isinstance(command, str):
+        return None
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    checker = Path(__file__).resolve().parent / "templates/doc-swarm/checks/doc_check.py"
+    if len(argv) < 4 or argv[1] != str(checker) or Path(argv[0]).name not in ("python", "python3"):
+        return None
+    # Ordinary shell commands always go through the generic checker sandbox.
+    opts = argv[2:]
+    allowed = {"--doc-path", "--source-root", "--required-sections", "--min-words", "--min-section-words",
+               "--symbol-section", "--symbol-allowlist", "--runnable-language", "--example-runner", "--example-cwd"}
+    if len(opts) % 2 or any(k not in allowed for k in opts[::2]) or len(set(opts[::2])) != len(opts[::2]):
+        return None
+    fields = dict(zip(opts[::2], opts[1::2]))
+    for key in ("--doc-path", "--source-root", "--example-cwd"):
+        if key not in fields:
+            return None
+        path = Path(fields[key])
+        if ".." in path.parts or path == Path("/"):
+            raise ValueError("Invalid document verifier input")
+        path = path if path.is_absolute() else cwd / path
+        if path.is_relative_to(cwd):
+            path = snapshot / path.relative_to(cwd)
+        elif not any(path == g or (g.is_dir() and g in path.parents) for g in grants):
+            raise ValueError("Document verifier input was not granted")
+        fields[key] = str(path)
+    return [sys.executable, "-I", "-S", str(checker), *(v for pair in fields.items() for v in pair)]
+
+
+async def run_isolated_check(command: str | list[str], cwd: Path, timeout: float, log_path: Path | None = None,
+                             *, inputs: tuple[str, ...] = (), expected: tuple[str, ...] = (),
+                             worktree_git: tuple[Path, Path] | None = None) -> tuple[int | None, bool, str]:
+    """Run a verifier in a disposable task snapshot and publish declared outputs."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="ringer-check-", dir="/tmp") as temporary, contextlib.ExitStack() as stack:
+            scratch = Path(temporary).resolve()
+            task = stack.enter_context(open_directory(cwd))
+            snapshot = scratch / "task"
+            snapshot.mkdir()
+            (scratch / "home").mkdir()
+            _snapshot_task(task, snapshot)
+            if worktree_git is not None:
+                _snapshot_worktree_git(snapshot, *worktree_git)
+            with open_directory(snapshot) as snapshot_fd, open_directory(scratch) as scratch_fd:
+                original = {}
+                for item in expected:
+                    path = Path(item).expanduser()
+                    if path.is_absolute():
+                        if not path.is_relative_to(cwd):
+                            continue
+                        path = path.relative_to(cwd)
+                    parts = relative_parts(path)
+                    original[parts] = _output_signature(snapshot_fd, parts)
+                mounts = []
+                externals = {path for path in external_outputs(expected) if not path.is_relative_to(cwd)}
+                paths = {Path(value).expanduser() for value in inputs}
+                if worktree_git is not None:
+                    paths.add(worktree_git[1])
+                for path in sorted(paths):
+                    if not path.is_relative_to(cwd):
+                        mounts.append((path, stack.enter_context(open_input(path))))
+                # Read-only inputs take precedence over external output declarations.
+                writable = {path for path in externals if not any(path.is_relative_to(item) for item in paths)}
+                output_mounts, external_files = _prepare_external_outputs(writable, scratch)
+                doc = bundled_doc_check(command, cwd, snapshot, paths | externals)
+                if sys.platform == "darwin":
+                    # Seatbelt has no bind mounts. Redirect declared path operands into
+                    # staging and retain read access to any previously published file.
+                    command = _mac_output_operands(command, external_files)
+                    for path in sorted(writable):
+                        with contextlib.suppress(FileNotFoundError):
+                            mounts.append((path, stack.enter_context(open_input(path))))
+                external_before = {
+                    (path, parts): _output_signature(scratch_fd, parts)
+                    for path, mirror in external_files for parts in (mirror.relative_to(scratch).parts,)
+                }
+                if doc is not None:
+                    # Seatbelt and some Linux hosts prohibit nested sandboxes. This fixed
+                    # reader opens inputs through descriptors and isolates each example.
+                    result = await run_bounded(doc, snapshot, timeout, log_path,
+                                               env=sandbox_environment(scratch))
+                else:
+                    with sandbox_command(command, cwd=cwd, scratch=scratch,
+                                         read_mounts=mounts, work_mount=snapshot,
+                                         output_mounts=output_mounts) as (argv, fds, env, host_cwd):
+                        result = await run_bounded(argv, host_cwd, timeout, log_path, env=env, pass_fds=fds)
+                if result[0] == 0 and not result[1]:
+                    _publish_check_outputs(snapshot_fd, task, original)
+                    for (path, parts), before in external_before.items():
+                        after = _output_signature(scratch_fd, parts)
+                        if after is None and before is not None:
+                            raise OSError(f"check removed or replaced expected output: {path}")
+                        if after is not None and after != before:
+                            with open_regular(scratch_fd, parts) as (source, info):
+                                with open_directory(path.parent, create=True) as parent:
+                                    _publish_one_output(source, info, parent, path.name)
+                return result
+    except (OSError, ValueError, RuntimeError) as exc:
+        message = f"[ringer] isolated verification failed: {exc}\n"
+        if log_path is not None:
+            with contextlib.suppress(OSError):
+                append_log(log_path, message.encode())
+        return (126 if isinstance(exc, SandboxUnavailable) else 1), False, message
 
 
 def task_path(taskdir: Path, value: str) -> Path:
@@ -635,14 +889,32 @@ def preflight_local(task: Any, taskdir: Path) -> tuple[str | None, str]:
                 return "missing_checker", f"checker script missing before dispatch: {path}"
             break
     # Probe the existing parent; checks may create nested directories and outputs later.
-    for name in task.expect_files:
-        parent = task_path(taskdir, name).parent
-        while not parent.exists() and parent != parent.parent:
-            parent = parent.parent
-        fd, probe = tempfile.mkstemp(prefix=".ringer-write-probe-", dir=parent)
-        os.close(fd)
-        os.unlink(probe)
+    with open_directory(taskdir) as task_fd, open_directory(Path("/")) as root_fd:
+        for name in task.expect_files:
+            path = Path(name).expanduser()
+            is_absolute = path.is_absolute()
+            parts = absolute_parts(path) if is_absolute else relative_parts(path)
+            if not parts:
+                raise OSError(f"expected a file: {path}")
+            _probe_output_parent(root_fd if is_absolute else task_fd, parts[:-1])
     return None, ""
+
+
+def _probe_output_parent(root_fd: int, parts: tuple[str, ...]) -> None:
+    for depth in range(len(parts), -1, -1):
+        try:
+            with descend(root_fd, parts[:depth]) as parent:
+                if sys.platform == "linux":
+                    fd, probe = tempfile.mkstemp(prefix=".ringer-write-probe-", dir=f"/proc/self/fd/{parent}")
+                    name = Path(probe).name
+                else:
+                    name = ".ringer-write-probe-" + secrets.token_hex(16)
+                    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+                os.close(fd)
+                os.unlink(name, dir_fd=parent)
+                return
+        except FileNotFoundError:
+            continue
 
 
 def reconcile_outcomes(states: list[dict[str, Any]], attempts: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -744,11 +1016,12 @@ def read_export_evidence(deliverables: list[dict[str, Any]]) -> list[dict[str, A
     for item in deliverables:
         row = dict(item)
         try:
-            path = Path(item["path"])
-            row["actual_sha256"] = sha256_file(path)
-            row["actual_bytes"] = path.stat().st_size
+            path = Path(item["path"]).absolute()
+            with open_directory(path.parent) as parent, open_regular(parent, (path.name,), nonempty=False) as (stream, info):
+                row["actual_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+                row["actual_bytes"] = info.st_size
             row["matches"] = (row["actual_sha256"] == item["sha256"] and row["actual_bytes"] == item["bytes"]) if item.get("sha256") and item.get("bytes") is not None else None
-        except (OSError, KeyError) as exc:
+        except (OSError, KeyError, ValueError, TypeError) as exc:
             row.update(matches=False, error=str(exc))
         evidence.append(row)
     return evidence

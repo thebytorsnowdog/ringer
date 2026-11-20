@@ -13,6 +13,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -62,6 +63,7 @@ def completion_body(model: str, spec: str, max_tokens: int) -> dict[str, Any]:
         "model": strip_openrouter_prefix(model),
         "messages": [{"role": "user", "content": spec}],
         "max_tokens": max_tokens,
+        "usage": {"include": True},
     }
 
 
@@ -119,7 +121,7 @@ def post_once(
     )
     send = opener or urllib.request.build_opener(_NoRedirect).open
     with send(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+        payload = json.loads(response.read().decode("utf-8"), parse_float=Decimal)
     if not isinstance(payload, dict):
         raise ValueError("OpenRouter response is not an object")
     return payload
@@ -154,17 +156,18 @@ def execute(
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
     prompt_tokens = usage.get("prompt_tokens")
     completion_tokens = usage.get("completion_tokens")
+    prompt_tokens = prompt_tokens if type(prompt_tokens) is int and prompt_tokens >= 0 else None
+    completion_tokens = completion_tokens if type(completion_tokens) is int and completion_tokens >= 0 else None
     choices = payload.get("choices")
     content = ""
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
         message = choices[0].get("message")
         if isinstance(message, dict) and isinstance(message.get("content"), str):
             content = message["content"]
-    out_path = Path(cwd) / "openrouter-output.txt"
-    out_path.write_text(content, encoding="utf-8")
     line = {
         "type": "turn.completed",
         "model": model,
+        "provider": "openrouter",
         "usage": {
             "input_tokens": prompt_tokens,
             "output_tokens": completion_tokens,
@@ -174,15 +177,28 @@ def execute(
         "max_input_tokens": max_input,
         "max_output_tokens": max_tokens,
     }
-    if not isinstance(prompt_tokens, int) or not isinstance(completion_tokens, int):
-        line["type"] = "error"
-        line["error"] = {"type": "usage_missing", "message": "OpenRouter response omitted integer usage"}
-        return 1, json.dumps(line)
-    if completion_tokens > max_tokens or prompt_tokens > max_input:
-        line["type"] = "error"
-        line["error"] = {"type": "bound_exceeded", "message": "reported usage exceeds the reserved token bound"}
-        return 1, json.dumps(line)
-    return 0, json.dumps(line)
+    if isinstance(payload.get("id"), str):
+        line["id"] = payload["id"]
+    # OpenRouter's response-level usage.cost is the charge in USD-denominated
+    # credits. Native inference cost and catalogue prices are different figures.
+    reported_cost = usage.get("cost")
+    if type(reported_cost) in (int, Decimal):
+        cost = Decimal(reported_cost)
+        if cost.is_finite() and cost >= 0:
+            line["provider_cost"] = {"currency": "USD", "amount": str(cost)}
+    error = None
+    if (completion_tokens is not None and completion_tokens > max_tokens
+            or prompt_tokens is not None and prompt_tokens > max_input):
+        error = ("bound_exceeded", "reported usage exceeds the reserved token bound")
+    elif prompt_tokens is None or completion_tokens is None:
+        error = ("usage_missing", "OpenRouter response omitted valid integer usage")
+    try:
+        (Path(cwd) / "openrouter-output.txt").write_text(content, encoding="utf-8")
+    except OSError:
+        error = error or ("output_write", "could not write the OpenRouter output")
+    if error is not None:
+        line.update(type="error", error={"type": error[0], "message": error[1]})
+    return int(error is not None), json.dumps(line)
 
 
 def main(argv: list[str]) -> int:

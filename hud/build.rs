@@ -11,6 +11,10 @@ fn main() {
         (dashboard_dir.join("ringside.css"), "ringside.css"),
         (dashboard_dir.join("ringside.js"), "ringside.js"),
         (
+            dashboard_dir.join("artifact-preview.js"),
+            "artifact-preview.js",
+        ),
+        (
             dashboard_dir.join("assets/ringside-mark.svg"),
             "assets/ringside-mark.svg",
         ),

@@ -31,10 +31,11 @@ Do not use this when docs require one worker to make cross-module product judgme
 | `{{LOCAL_DOC_VERIFY — exact preview, formatter, or docs command if one exists; otherwise write NONE}}` | Optional local docs command for the worker to run before finishing. |
 | `{{SYMBOL_SECTION}}` | Heading name that contains documented API symbols as Markdown code spans, usually `Documented Symbols`. |
 | `{{RUNNABLE_EXAMPLE_LANGUAGE}}` | Fence language treated as runnable, for example `python`, `bash`, or `javascript`. |
-| `{{EXAMPLE_CWD}}` | Directory where runnable examples execute. Usually the repo root or a fixture directory. |
-| `{{EXAMPLE_RUNNER_COMMAND}}` | Command template used to execute each runnable fence. Include `{file}` where the temp example file goes, for example `python3 {file}` or `node {file}`. |
+| `{{EXAMPLE_CWD}}` | Absolute path to the read-only source or fixture directory used for relative imports and reads. Each example starts in a fresh scratch directory. |
+| `{{EXAMPLE_RUNNER_COMMAND}}` | Command template for each runnable fence. Use `{file}` for the temporary script and `{example_cwd}` for the read-only fixture path. Ordinary runners such as `python3 {file}` and `node {file}` work. |
 | `{{PYTHON}}` | Python executable for the check script. |
 | `{{KIT_DIR}}` | Absolute path to `templates/doc-swarm` in this Ringer checkout or copied kit location. |
+| `{{RINGER_CHECK_MODULE_DIR}}` | Absolute Ringer checkout root. For a copied kit, put the three listed Ringer modules beside `doc_check.py` and use that directory here. |
 | `{{REQUIRED_SECTIONS}}` | Semicolon-separated required Markdown headings, without `#`, for example `Overview;Documented Symbols;Examples;Assumptions`. |
 | `{{MIN_WORDS}}` | Minimum total word count for the doc. |
 | `{{MIN_SECTION_WORDS}}` | Minimum word count for each required section. |
@@ -44,7 +45,9 @@ Do not use this when docs require one worker to make cross-module product judgme
 
 `checks/doc_check.py` validates the doc path, required headings, total word count, and per-section substance.
 
-It extracts code spans from the configured symbol section and searches the source tree for each symbol, excluding common generated and dependency directories. It then executes every fenced block whose language matches `{{RUNNABLE_EXAMPLE_LANGUAGE}}` by writing the block to a temporary file and running `{{EXAMPLE_RUNNER_COMMAND}}`.
+It searches regular source files for the documented symbols, excluding common generated and dependency directories. Each matching fence runs in its own isolated process with a fresh working directory, read-only source and fixture access, a minimal environment, and networking disabled. Source and fixture paths in the manifest are explicit read grants. Select trees that contain only material the examples may read.
+
+Linux uses bubblewrap and libseccomp. macOS uses Seatbelt through `sandbox-exec`. Verification fails if the OS sandbox cannot start.
 
 This is hard to game because invented API names fail source lookup and fake examples fail execution. It still cannot prove the prose is good; the orchestrator should spot-check a passing doc and run a synthesis pass for cross-surface consistency.
 

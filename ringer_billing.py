@@ -49,6 +49,17 @@ class AccountEvidenceError(ValueError):
     pass
 
 
+def codex_subscription_env() -> dict[str, str]:
+    # Workload identity is selected before Codex applies its login-method
+    # restriction. Keep native ChatGPT auth and exclude alternate API inputs.
+    api_auth = {
+        "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_FEDERATION_RULE_ID",
+        "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_IDENTITY_TOKEN_SOURCE",
+        "OPENAI_SPIFFE_AUDIENCE", "OPENAI_SPIFFE_ID",
+    }
+    return {name: value for name, value in os.environ.items() if name not in api_auth}
+
+
 async def _close_server(proc: asyncio.subprocess.Process) -> None:
     if proc.stdin is not None:
         proc.stdin.close()
@@ -60,7 +71,8 @@ async def _close_server(proc: asyncio.subprocess.Process) -> None:
 
 
 async def observe_codex_account(binary: str, cwd: Path, *, timeout_s: float = 10,
-                                require_quota: bool = True) -> dict[str, Any]:
+                                require_quota: bool = True,
+                                env: dict[str, str] | None = None) -> dict[str, Any]:
     """Read app-server account/limits only, bounded including notifications/EOF.
 
     The deadline covers launch and all replies; unrelated notifications and
@@ -70,7 +82,7 @@ async def observe_codex_account(binary: str, cwd: Path, *, timeout_s: float = 10
     async def exchange() -> dict[str, Any]:
         nonlocal proc
         proc = await asyncio.create_subprocess_exec(
-            binary, "app-server", "--stdio", cwd=str(cwd),
+            binary, "app-server", "--stdio", cwd=str(cwd), env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True, limit=65536)
         pending: dict[int, dict[str, Any]] = {}
@@ -182,17 +194,20 @@ async def observe_codex_account(binary: str, cwd: Path, *, timeout_s: float = 10
             await _close_server(proc)
 
 
-def enforce_codex_command(command: list[str], model: str, route: str, spec: str) -> list[str]:
-    """Reject ambiguous routing, then force observed auth on the actual argv.
+def enforce_codex_command(command: list[str], model: str | None, route: str, spec: str) -> list[str]:
+    """Reject ambiguous routing, then force the required auth on the actual argv.
 
-    Require ordinary exec with a separate final prompt. No sandbox/permission
-    options are added, removed or relaxed by this function.
+    Require a separate final prompt and ordinary exec for assessed billing.
+    The legacy subscription path can also use the Codex root command.
+    No sandbox/permission options are added, removed or relaxed.
     """
-    if not model:
+    legacy_subscription = model is None and route == "subscription"
+    if not model and not legacy_subscription:
         raise ValueError("billing requires an explicit task model")
-    if len(command) < 3 or command[1] != "exec" or command[-1] != spec:
+    is_exec = len(command) >= 3 and command[1] == "exec"
+    if len(command) < 2 or command[-1] != spec or not (is_exec or legacy_subscription):
         raise ValueError("billing requires Codex exec with a separate final {spec}")
-    args = command[2:-1]
+    args = command[2 if is_exec else 1:-1]
     if "--" in args or any(a in {"resume", "review", "--oss", "--local-provider", "--profile", "-p"} or a.startswith(("--profile=", "--local-provider=")) for a in args):
         raise ValueError("billing rejects alternative Codex routing/profile arguments")
     models = []
@@ -212,7 +227,7 @@ def enforce_codex_command(command: list[str], model: str, route: str, spec: str)
         elif arg.startswith("--config="):
             config = arg.partition("=")[2]
         elif arg.startswith("-c") and arg != "-c":
-            config = arg[2:]
+            config = arg[2:].removeprefix("=")
         if config is not None:
             key, _, value = config.partition("=")
             key = key.strip().strip('"\'')
@@ -221,11 +236,12 @@ def enforce_codex_command(command: list[str], model: str, route: str, spec: str)
                     raise ValueError("billing rejects conflicting forced_login_method")
             elif key == "model" or key.startswith(("model_provider", "model_providers", "profile")):
                 raise ValueError("billing rejects model/provider configuration overrides")
-    if models != [model]:
+    if model is not None and models != [model]:
         raise ValueError("billing requires exactly one forwarded -m/--model matching the task model")
     # Put enforced overrides after the configured args, before the final prompt.
     return command[:-1] + ["-c", f'forced_login_method="{expected_auth}"',
-                           "-c", 'model_provider="openai"'] + command[-1:]
+                           "-c", 'model_provider="openai"'] + (
+                               ["--", spec] if not is_exec or spec.startswith("-") else [spec])
 
 
 def enforce_opencode_command(command: list[str], model: str, spec: str) -> list[str]:
@@ -305,6 +321,7 @@ class Admission:
     allowed: bool
     evidence: dict[str, Any]
     policy: dict[str, Any] | None = None
+    openrouter_bounds: tuple[int, int] | None = None
 
 
 async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
@@ -318,6 +335,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
         evidence.update(billing_reason=reason, billing_failure_class=kind)
         return Admission(False, evidence), command
     try:
+        openrouter_bounds = None
         # Re-read policy for each attempt, so a reduced cap takes effect on retry.
         policy = validate_cost_policy(json.loads(policy_path.read_text(encoding="utf-8")))
         if route is None:
@@ -343,6 +361,9 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 command = enforce_openrouter_command(command, model, spec)
             except ValueError as exc:
                 return blocked(str(exc), "permission")
+            input_bound, output_bound = _command_token_bounds(command)
+            assert input_bound is not None and output_bound is not None
+            openrouter_bounds = (input_bound, output_bound)
         elif engine == "claude":
             return blocked(
                 "no Claude subscription is available. " + OPENROUTER_NOT_SELECTED,
@@ -361,7 +382,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
         if route == "api" and "run_api_cap_gbp" not in policy:
             return blocked("paid API requires an explicit run_api_cap_gbp", "unknown")
         if engine in {"opencode", "openrouter"}:
-            bounds = _command_token_bounds(command) if engine == "openrouter" else (None, None)
+            bounds = openrouter_bounds or (None, None)
             planned = prepare_openrouter_dispatch(
                 model=model, allowance=allowance, attempt=attempt, policy=policy,
                 input_tokens=bounds[0], output_tokens=bounds[1], engine=engine,
@@ -379,7 +400,8 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                         "observed_at": None, "rateLimitsByLimitId": {}}
         else:
             snapshot = await observe_codex_account(binary, taskdir, timeout_s=timeout_s,
-                                                   require_quota=route == "subscription")
+                                                   require_quota=route == "subscription",
+                                                   env=codex_subscription_env() if route == "subscription" else None)
         evidence.update(observed_auth_mode=snapshot["observed_auth_mode"],
                         quota_observed_at=snapshot["observed_at"], plan_type=snapshot["plan_type"],
                         quota=snapshot["rateLimitsByLimitId"])
@@ -400,7 +422,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
         evidence.update(billing_status="ADMITTED", billing_reason=decision.reason,
                         reservation_id=decision.reservation_id,
                         reservation_status="reserved" if decision.reservation_id else "not_applicable")
-        return Admission(True, evidence, policy), command
+        return Admission(True, evidence, policy, openrouter_bounds), command
     except AccountEvidenceError as exc:
         return blocked(str(exc), "permission")
     except (ValueError, TypeError, OSError) as exc:
@@ -408,13 +430,23 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
 
 
 def usage_evidence(text: str, model: str, *, complete: bool, policy: dict[str, Any] | None = None,
-                   service_tier: str | None = None) -> dict[str, Any]:
+                   service_tier: str | None = None,
+                   openrouter_bounds: tuple[int, int] | None = None) -> dict[str, Any]:
     """Only usage events, never prompts or full log payloads, enter billing state."""
     try:
         events = parse_usage_lines(text.splitlines(), expected_model=model, service_tier=service_tier)
     except ValueError as exc:
         return dict(usage_coverage="unknown", cost_coverage="unknown", usage_error=str(exc), actual_cost_usd=None)
     recognised = [e for e in events if e.source in {"turn.completed", "step_finish", "step-finish", "codex-text-total"}]
+    # This route admits a single request with trusted bounds from the final
+    # command. The worker can report a provider response and still exit with
+    # an error, for example when the response exceeded those bounds.
+    openrouter_response = None
+    if openrouter_bounds is not None and len(events) == 1:
+        event = events[0]
+        if event.source in {"turn.completed", "error"}:
+            openrouter_response = event
+            recognised = events
     # Missing or malformed usage cannot become a settled zero.
     valid = bool(recognised) and len(recognised) == len(events) and all(not e.issue for e in events)
     detailed = valid and all(None not in (e.input_tokens, e.cached_input_tokens,
@@ -429,7 +461,23 @@ def usage_evidence(text: str, model: str, *, complete: bool, policy: dict[str, A
             continue
         if isinstance(row, dict) and (row.get("type") in {"error", "turn.failed"} or "error" in row):
             complete = False
-    actual = valid and complete and all(e.actual_cost_usd is not None for e in events)
+    provider_response_received = openrouter_response is not None and openrouter_response.provider == "openrouter"
+    actual = valid and (complete or provider_response_received) and all(
+        e.actual_cost_usd is not None for e in events)
+    openrouter_evidence = {}
+    if openrouter_response is not None:
+        input_bound, output_bound = openrouter_bounds
+        inp, out = openrouter_response.input_tokens, openrouter_response.output_tokens
+        estimate = None
+        if inp is not None and out is not None:
+            # The catalogue is optional comparison data once a call returned.
+            with contextlib.suppress(OSError, ValueError, TypeError, AttributeError, ArithmeticError):
+                estimate = catalogue_usd(model, inp, out)
+        openrouter_evidence = dict(
+            token_bound_exceeded=(inp is not None and inp > input_bound)
+                                 or (out is not None and out > output_bound),
+            catalogue_estimate_usd=estimate,
+        )
     # A wrapper can emit the legacy total after structured completions. Prefer
     # their counters rather than adding the summary to the same usage again.
     token_events = [e for e in recognised if e.source != "codex-text-total"] or recognised
@@ -455,31 +503,29 @@ def usage_evidence(text: str, model: str, *, complete: bool, policy: dict[str, A
                 usage_events=serialise([asdict(e) for e in events]),
                 cost_estimates=serialise([asdict(e) for e in estimates]),
                 worker_tokens=sum(totals) if known_total else None,
-                thread_id=thread_id)
+                thread_id=thread_id, **openrouter_evidence)
 
 
 def settle_admission(admission: Admission, state_dir: Path, usage: dict[str, Any]) -> None:
     evidence = admission.evidence
-    if usage.get("actual_cost_usd") is None:
-        completed = [event for event in usage.get("usage_events") or [] if event.get("source") == "turn.completed"]
-        if len(completed) == 1 and None not in (completed[0].get("input_tokens"), completed[0].get("output_tokens")):
-            priced = catalogue_usd(
-                str(completed[0].get("model") or evidence.get("model") or ""),
-                int(completed[0]["input_tokens"]),
-                int(completed[0]["output_tokens"]),
-            )
-            if priced is not None:
-                usage = dict(usage)
-                usage["actual_cost_usd"] = priced
-                usage["cost_coverage"] = "catalogue-priced-reported-tokens"
     evidence.update(usage)
     identity = evidence.get("reservation_id")
     if identity is None:
         return
     evidence["reservation_status"] = "unresolved"
+    ledger = SpendLedger(state_dir)
+    if admission.openrouter_bounds is not None and usage.get("token_bound_exceeded") is True:
+        if not ledger.record_token_overrun(identity):
+            raise ValueError("could not record a token overrun for the started reservation")
     fx = (admission.policy or {}).get("fx")
-    if usage.get("actual_cost_usd") is not None and fx:
-        actual = Decimal(usage["actual_cost_usd"]) * Decimal(fx["usd_to_gbp"])
+    if usage.get("cost_coverage") == "provider_actual" and usage.get("actual_cost_usd") is not None and fx:
+        try:
+            actual = Decimal(usage["actual_cost_usd"]) * Decimal(fx["usd_to_gbp"])
+        except ArithmeticError:
+            evidence["settlement_error"] = "reported provider charge cannot be converted to GBP"
+            return
         source = f"provider-reported USD; FX {fx['dated']} {fx.get('source', 'policy')}"
-        if SpendLedger(state_dir).settle(identity, actual, source=source):
+        if admission.openrouter_bounds is not None:
+            source = f"OpenRouter response usage.cost; {source}"
+        if ledger.settle(identity, actual, source=source):
             evidence.update(reservation_status="settled", actual_cost_gbp=str(actual), fx=fx)

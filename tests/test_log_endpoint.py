@@ -10,7 +10,7 @@ import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from ringer import (  # noqa: E402
     Dashboard,
     EngineConfig,
+    HUD_TOKEN_HEADER,
     StateWriter,
     TaskRuntime,
     TaskSpec,
@@ -98,13 +99,14 @@ class LogEndpointTests(unittest.TestCase):
         port = dashboard.start()
         self.addCleanup(dashboard.stop)
         writer.set_port(port)
+        headers = {HUD_TOKEN_HEADER: dashboard.token}
 
-        with urlopen(f"http://127.0.0.1:{port}/state.json", timeout=5) as response:
+        with urlopen(Request(f"http://127.0.0.1:{port}/state.json", headers=headers), timeout=5) as response:
             self.assertEqual(200, response.status)
             state_body = json.loads(response.read().decode("utf-8"))
         self.assertEqual(port, state_body["dashboard_port"])
 
-        with urlopen(f"http://127.0.0.1:{port}/logs/known-task", timeout=5) as response:
+        with urlopen(Request(f"http://127.0.0.1:{port}/logs/known-task", headers=headers), timeout=5) as response:
             self.assertEqual(200, response.status)
             self.assertEqual("text/plain; charset=utf-8", response.headers["Content-Type"])
             body = response.read().decode("utf-8")
@@ -114,12 +116,12 @@ class LogEndpointTests(unittest.TestCase):
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         self.addCleanup(conn.close)
 
-        conn.request("GET", "/logs/unknown")
+        conn.request("GET", "/logs/unknown", headers=headers)
         unknown_response = conn.getresponse()
         self.assertEqual(404, unknown_response.status)
         unknown_response.read()
 
-        conn.request("GET", "/logs/../x")
+        conn.request("GET", "/logs/../x", headers=headers)
         traversal_response = conn.getresponse()
         self.assertEqual(404, traversal_response.status)
         traversal_response.read()

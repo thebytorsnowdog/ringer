@@ -256,15 +256,7 @@ Loading log…</pre
       </form>
     </dialog>
     <script src="/hud.js"></script>
+    <script src="/artifact-preview.js"></script>
     <script src="/ringside.js"></script>
-    <script>
-      function pingViewer() {
-        const token = document.querySelector('meta[name="ringer-token"]')?.content || '';
-        const headers = token ? {'X-Ringer-Token': token} : {};
-        fetch('/api/viewer-ping', {cache: 'no-store', headers}).catch(() => {});
-      }
-      pingViewer();
-      setInterval(pingViewer, 5000);
-    </script>
   </body>
 </html>

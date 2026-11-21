@@ -4,6 +4,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import os
 import re
 import shutil
 import stat
@@ -161,6 +162,25 @@ class BrowserDashboardTests(unittest.TestCase):
             self.assertIn("default-src 'none'", policy)
             self.assertNotIn("allow-same-origin", policy)
             self.assertNotIn("allow-scripts", policy)
+
+    def test_custom_hud_directory_is_created_private_even_with_a_shared_umask(self):
+        directory = self.root / "custom-state"
+        previous = os.umask(0o002)
+        try:
+            ringer.write_hud_token(directory, "d" * 43)
+        finally:
+            os.umask(previous)
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        self.assertEqual(ringer.read_hud_token(directory), "d" * 43)
+
+    def test_existing_group_writable_custom_directory_is_refused(self):
+        directory = self.root / "shared-state"
+        directory.mkdir()
+        directory.chmod(0o770)
+        with self.assertRaises(PermissionError):
+            ringer.write_hud_token(directory, "d" * 43)
+        self.assertFalse(ringer.hud_token_path(directory).exists())
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o770)
 
     def test_startup_protects_existing_default_run_history(self):
         private = self.root / "old-state"

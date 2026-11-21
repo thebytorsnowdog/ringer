@@ -37,7 +37,8 @@ class PersistentHudServerTests(unittest.TestCase):
         self.runs_dir = self.state_dir / "runs"
         self.artifacts_dir = self.state_dir / "artifacts"
         self.workdir = self.root / "work"
-        self.runs_dir.mkdir(parents=True)
+        self.state_dir.mkdir(mode=0o700)
+        self.runs_dir.mkdir()
         self.artifacts_dir.mkdir(parents=True)
         self.workdir.mkdir(parents=True)
         self.ringside_stub = self.root / "ringside.html"

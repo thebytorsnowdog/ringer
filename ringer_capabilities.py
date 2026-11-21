@@ -440,13 +440,21 @@ def _file_exists(value: str, environ: Mapping[str, str]) -> bool:
 
 def command_available(name: str, environ: Mapping[str, str]) -> bool:
     if name == "agy":
-        if _file_exists(environ.get("RINGER_GEMINI_BIN", ""), environ) or _file_exists(DEFAULT_AGY_BIN, environ):
+        if (
+            _file_exists(environ.get("RINGER_GEMINI_BIN", ""), environ)
+            or _file_exists(DEFAULT_AGY_BIN, environ)
+            or _file_exists("~/.local/bin/agy", environ)
+        ):
             return True
     elif name == "claude":
         if _file_exists(environ.get("RINGER_CLAUDE_BIN", ""), environ) or _file_exists(DEFAULT_CLAUDE_BIN, environ):
             return True
     elif name == "opencode":
-        if _file_exists(environ.get("RINGER_OPENCODE_BIN", ""), environ) or _file_exists(DEFAULT_OPENCODE_BIN, environ):
+        if (
+            _file_exists(environ.get("RINGER_OPENCODE_BIN", ""), environ)
+            or _file_exists(DEFAULT_OPENCODE_BIN, environ)
+            or _file_exists("/opt/homebrew/bin/opencode", environ)
+        ):
             return True
     path = environ.get("PATH")
     if path is None:

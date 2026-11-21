@@ -18,6 +18,8 @@ from pathlib import Path
 DEFAULT_OPENCODE_BINS = (
     os.path.expanduser("~/.local/share/mise/installs/opencode/latest/node_modules/.bin/opencode"),
     os.path.expanduser("~/.local/share/mise/shims/opencode"),
+    "/opt/homebrew/bin/opencode",
+    "/usr/local/bin/opencode",
 )
 DEFAULT_KEY_PATHS = (
     ".runtime/gemini-api/gemini.key",
@@ -92,10 +94,11 @@ def load_gemini_api_key(cwd: str, env: dict[str, str]) -> str:
     return ""
 
 
-def parse_args(argv: list[str]) -> tuple[str, str, str, list[str]]:
+def parse_args(argv: list[str]) -> tuple[str, str, str, str, list[str]]:
     cwd = ""
     model = "google/gemini-4-argon"
     spec = ""
+    sandbox_wrapper = ""
     extra: list[str] = []
     idx = 0
     while idx < len(argv):
@@ -107,6 +110,12 @@ def parse_args(argv: list[str]) -> tuple[str, str, str, list[str]]:
             idx += 2
         elif arg.startswith(("--cwd=", "--dir=")):
             cwd = arg.partition("=")[2]
+            idx += 1
+        elif arg == "--sandbox-wrapper" and idx + 1 < len(argv):
+            sandbox_wrapper = argv[idx + 1]
+            idx += 2
+        elif arg.startswith("--sandbox-wrapper="):
+            sandbox_wrapper = arg.partition("=")[2]
             idx += 1
         elif arg in {"-m", "--model"} and idx + 1 < len(argv):
             model = argv[idx + 1]
@@ -130,7 +139,7 @@ def parse_args(argv: list[str]) -> tuple[str, str, str, list[str]]:
             idx += 1
     if not spec and extra:
         spec = extra.pop()
-    return cwd, model, spec, extra
+    return cwd, model, spec, sandbox_wrapper, extra
 
 
 def build_exec_args(
@@ -138,7 +147,7 @@ def build_exec_args(
     *,
     env: dict[str, str] | None = None,
 ) -> tuple[list[str], dict[str, str], str]:
-    cwd, model, spec, extra = parse_args(argv)
+    cwd, model, spec, sandbox_wrapper, extra = parse_args(argv)
     if not spec:
         raise ValueError("gemini_api_worker: missing prompt (-p <spec>)")
     target_cwd = cwd or os.getcwd()
@@ -158,17 +167,7 @@ def build_exec_args(
     child_env["GOOGLE_GENERATIVE_AI_API_KEY"] = key
     normalized_model = normalize_gemini_api_model(model)
 
-    opencode_bin = child_env.get("RINGER_OPENCODE_BIN") or ""
-    if not opencode_bin or not Path(opencode_bin).is_file():
-        opencode_bin = next((p for p in DEFAULT_OPENCODE_BINS if Path(p).is_file()), "")
-    if not opencode_bin:
-        resolved = shutil.which("opencode")
-        if resolved:
-            opencode_bin = resolved
-    if not opencode_bin:
-        raise FileNotFoundError("opencode binary not found")
-    cmd = [
-        opencode_bin,
+    opencode_args = [
         "run",
         "--standalone",
         "--auto",
@@ -179,6 +178,25 @@ def build_exec_args(
         *extra,
         spec,
     ]
+    if sandbox_wrapper:
+        # Ensure Homebrew / local bins are visible to wrapper scripts like opencode-sandboxed.sh.
+        cur_path = child_env.get("PATH") or ""
+        extra_dirs = [d for d in ("/opt/homebrew/bin", "/usr/local/bin") if os.path.isdir(d) and d not in cur_path.split(":")]
+        if extra_dirs:
+            child_env["PATH"] = ":".join([*extra_dirs, cur_path]) if cur_path else ":".join(extra_dirs)
+        cmd = [sandbox_wrapper, target_cwd, *opencode_args]
+        return cmd, child_env, target_cwd
+
+    opencode_bin = child_env.get("RINGER_OPENCODE_BIN") or ""
+    if not opencode_bin or not Path(opencode_bin).is_file():
+        opencode_bin = next((p for p in DEFAULT_OPENCODE_BINS if Path(p).is_file()), "")
+    if not opencode_bin:
+        resolved = shutil.which("opencode")
+        if resolved:
+            opencode_bin = resolved
+    if not opencode_bin:
+        raise FileNotFoundError("opencode binary not found")
+    cmd = [opencode_bin, *opencode_args]
     return cmd, child_env, target_cwd
 
 

@@ -9,6 +9,12 @@ import sys
 from pathlib import Path
 
 DEFAULT_AGY_BIN = os.path.expanduser("~/.local/share/mise/installs/antigravity-cli/latest/agy")
+FALLBACK_AGY_BINS = (
+    DEFAULT_AGY_BIN,
+    os.path.expanduser("~/.local/bin/agy"),
+    "/opt/homebrew/bin/agy",
+    "/usr/local/bin/agy",
+)
 
 EFFORT_LEVEL_MAP: dict[str, str] = {
     "minimal": "low",
@@ -105,6 +111,8 @@ def build_exec_args(argv: list[str]) -> tuple[list[str], dict[str, str], str]:
     env["HOME"] = str(home_dir)
 
     agy_bin = env.get("RINGER_GEMINI_BIN") or DEFAULT_AGY_BIN
+    if not Path(agy_bin).is_file():
+        agy_bin = next((p for p in FALLBACK_AGY_BINS if Path(p).is_file()), agy_bin)
     if not Path(agy_bin).is_file():
         resolved = shutil.which("agy")
         if resolved:

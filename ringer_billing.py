@@ -12,6 +12,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -295,14 +296,19 @@ def parse_gemini_quota_status(payload: Any, *, now: datetime | None = None) -> d
 
 
 def _read_antigravity_access_token(*, timeout_s: float = 3.0) -> str:
-    """Read Antigravity OAuth access token from OS keyring or oauth-token file.
+    """Read Antigravity OAuth access token from OS keyring/Keychain or oauth-token file.
 
     Never reads GEMINI_API_KEY or GOOGLE_API_KEY, and never logs or retains the token.
     """
     data = None
+    lookup_cmd = (
+        ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]
+        if sys.platform == "darwin"
+        else ["secret-tool", "lookup", "service", "gemini", "username", "antigravity"]
+    )
     try:
         raw = subprocess.check_output(
-            ["secret-tool", "lookup", "service", "gemini", "username", "antigravity"],
+            lookup_cmd,
             text=True,
             stderr=subprocess.DEVNULL,
             timeout=min(timeout_s, 3.0),

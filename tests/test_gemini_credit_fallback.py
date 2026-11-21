@@ -180,7 +180,7 @@ class GeminiCreditFallbackRunnerTests(unittest.TestCase):
             "monthly_gemini_api_cap_usd": "40",
             "run_gemini_api_cap_usd": "10",
             "task_gemini_api_cap_usd": "2",
-            "fx": {"usd_to_gbp": "0.75", "dated": "2026-11-21", "source": "test"},
+            "fx": {"usd_to_gbp": "0.75", "dated": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "source": "test"},
         }
         body.update(overrides)
         validate_cost_policy(body)

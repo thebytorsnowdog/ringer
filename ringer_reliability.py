@@ -35,7 +35,7 @@ TERMINAL_STATUSES = frozenset({"pass", "fail", "blocked", "interrupted", "not_st
 SUBSCRIPTION_ENGINES = frozenset({"gemini", "claude", "codex", "grok"})
 OPENROUTER_FALLBACK_ENGINES = ("openrouter", "opencode")
 USAGE_AGENT_FILES: dict[str, tuple[str, ...]] = {
-    "gemini": ("antigravity.json", "gemini.json"),
+    "gemini": ("agy.json", "antigravity.json", "gemini.json"),
     "claude": ("claude.json",),
     "codex": ("codex.json",),
     "grok": ("grok.json",),

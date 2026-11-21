@@ -8,6 +8,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -417,7 +418,7 @@ class ModelAssessmentBoundaryTests(unittest.TestCase):
 
         policy = {
             "monthly_api_cap_gbp": 0, "run_api_cap_gbp": 0, "automatic_paid_fallback": False,
-            "fx": {"usd_to_gbp": "0.74711", "dated": "2026-11-06"},
+            "fx": {"usd_to_gbp": "0.74711", "dated": datetime.now(timezone.utc).strftime("%Y-%m-%d")},
         }
         paid_engine = dataclasses.replace(
             self.engine("opencode"),

@@ -158,17 +158,22 @@ class CapabilityMatrixTests(unittest.TestCase):
             )
             self.assertEqual("blocked", decision.status)
             self.assertIn("no Claude subscription", decision.reason)
-        for engine in ("grok", "gemini"):
-            open_route = assess_explicit_route(
-                engine=engine, model="grok-4.7" if engine == "grok" else "gemini-4-argon-medium",
-                billing_route="subscription", billing_policy_loaded=False,
+        open_grok = assess_explicit_route(
+            engine="grok", model="grok-4.7",
+            billing_route="subscription", billing_policy_loaded=False,
+        )
+        self.assertEqual("allowed", open_grok.status)
+        closed_grok = assess_explicit_route(
+            engine="grok", model="grok-4.7", billing_route="subscription",
+            billing_policy_loaded=True,
+        )
+        self.assertEqual("blocked", closed_grok.status)
+        for loaded in (False, True):
+            gemini_route = assess_explicit_route(
+                engine="gemini", model="gemini-4-argon-medium",
+                billing_route="subscription", billing_policy_loaded=loaded,
             )
-            self.assertEqual("allowed", open_route.status, engine)
-            closed = assess_explicit_route(
-                engine=engine, model=open_route.model, billing_route="subscription",
-                billing_policy_loaded=True,
-            )
-            self.assertEqual("blocked", closed.status, engine)
+            self.assertEqual("allowed", gemini_route.status)
 
     def test_explicit_route_is_kept_or_blocked_without_a_substitute(self) -> None:
         kept = assess_explicit_route(
@@ -312,13 +317,15 @@ class CapabilityMatrixTests(unittest.TestCase):
         self.assertTrue(codex.supported)
         self.assertIn("chatgpt", codex.reason)
         self.assertIn("api_key", codex.reason)
-        for probe in (grok, gemini, claude):
+        self.assertTrue(gemini.supported)
+        self.assertNotIn(secret, gemini.reason)
+        self.assertIn("keyring", gemini.reason)
+        self.assertIn("GEMINI_API_KEY", gemini.reason)
+        for probe in (grok, claude):
             self.assertFalse(probe.supported)
             self.assertNotIn(secret, probe.reason)
         self.assertIn("XAI_API_KEY", grok.reason)
         self.assertIn("auth.json", grok.reason)
-        self.assertIn("keyring", gemini.reason)
-        self.assertIn("GEMINI_API_KEY", gemini.reason)
         loaded = assess_explicit_route(
             engine="grok", model="grok-4.7", billing_route="subscription", billing_policy_loaded=True,
         )
@@ -416,7 +423,7 @@ class DispatchFailureTests(unittest.TestCase):
             ("grok", "grok-4.7", None, "not subscription evidence"),
             ("grok", "grok-4.7", "api", "no API-key route"),
             ("gemini", "gemini-4-argon-medium", "subscription", "keyring"),
-            ("gemini", "gemini-4-argon-medium", None, "keyring"),
+            ("gemini", "gemini-4-argon-medium", None, "explicit billing_route"),
             ("gemini", "gemini-4-argon-medium", "api", "no API-key route"),
             ("claude", "opus", "subscription", "no Claude subscription"),
             ("claude", "opus", None, "no Claude subscription"),

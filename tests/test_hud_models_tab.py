@@ -59,7 +59,7 @@ class HudModelsTabTests(unittest.TestCase):
         os.environ["HOME"] = str(self.root / "home")
         os.environ["RINGER_HOME"] = str(self.root / "ringer-home")
         self.state_dir = self.root / "state"
-        self.state_dir.mkdir(parents=True)
+        self.state_dir.mkdir(mode=0o700, parents=True)
         self.log_path = self.root / "models.jsonl"
         self.db_path = self.root / "ringer.db"
 

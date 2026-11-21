@@ -97,6 +97,7 @@ DEFAULT_HUD_PORT = 8700
 DEFAULT_CATALOG_SOURCE = "https://openrouter.ai/api/v1/models"
 CATALOG_AUTO_REFRESH_MAX_AGE_S = 24 * 60 * 60
 CATALOG_FETCH_TIMEOUT_S = 5
+MAX_CATALOG_BYTES = 16 * 1024 * 1024
 DEFAULT_UPDATE_CHECK_INTERVAL_S = 3600
 SELF_UPDATE_FETCH_TIMEOUT_S = 10
 SELF_UPDATE_STATE_FILE = "self-update.json"
@@ -2945,7 +2946,10 @@ def fetch_catalog_payload(source: str, *, timeout: float = CATALOG_FETCH_TIMEOUT
     if parsed.scheme in {"http", "https"}:
         request = urllib.request.Request(source, headers={"User-Agent": "ringer.py"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            data = response.read(MAX_CATALOG_BYTES + 1)
+        if len(data) > MAX_CATALOG_BYTES:
+            raise ValueError(f"catalog response exceeds {MAX_CATALOG_BYTES} bytes")
+        payload = json.loads(data.decode("utf-8"))
     else:
         payload = json.loads(Path(source).expanduser().read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -5808,15 +5812,19 @@ def protect_default_state(state_dir: Path) -> None:
 
 def write_hud_token(state_dir: Path, token: str) -> None:
     """Leave this launch's token where the CLI and the native shell can read it (owner-only)."""
-    protect_default_state(state_dir)
     write_owner_file(hud_token_path(state_dir), token)
 
 
-def write_owner_file(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    parent = path.parent.stat()
+def prepare_hud_directory(directory: Path) -> None:
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    protect_default_state(directory)
+    parent = directory.stat()
     if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
-        raise PermissionError(f"dashboard state directory must be writable only by its owner: {path.parent}")
+        raise PermissionError(f"dashboard state directory must be writable only by its owner: {directory}")
+
+
+def write_owner_file(path: Path, content: str) -> None:
+    prepare_hud_directory(path.parent)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -12557,7 +12565,7 @@ def ensure_hud_running(config: AppConfig, *, open_browser: bool) -> None:
     if not already_alive:
         log_path = config.state_dir / "hud.log"
         with contextlib.suppress(Exception):
-            log_path.parent.mkdir(parents=True, exist_ok=True)
+            prepare_hud_directory(state_dir)
             with log_path.open("ab") as log_file:
                 subprocess.Popen(
                     [sys.executable, str(Path(__file__).resolve()), "hud", "--no-open", "--port", str(port)],

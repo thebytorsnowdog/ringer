@@ -97,6 +97,7 @@ DEFAULT_HUD_PORT = 8700
 DEFAULT_CATALOG_SOURCE = "https://openrouter.ai/api/v1/models"
 CATALOG_AUTO_REFRESH_MAX_AGE_S = 24 * 60 * 60
 CATALOG_FETCH_TIMEOUT_S = 5
+MAX_CATALOG_BYTES = 16 * 1024 * 1024
 DEFAULT_UPDATE_CHECK_INTERVAL_S = 3600
 SELF_UPDATE_FETCH_TIMEOUT_S = 10
 SELF_UPDATE_STATE_FILE = "self-update.json"
@@ -2945,7 +2946,10 @@ def fetch_catalog_payload(source: str, *, timeout: float = CATALOG_FETCH_TIMEOUT
     if parsed.scheme in {"http", "https"}:
         request = urllib.request.Request(source, headers={"User-Agent": "ringer.py"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            data = response.read(MAX_CATALOG_BYTES + 1)
+        if len(data) > MAX_CATALOG_BYTES:
+            raise ValueError(f"catalog response exceeds {MAX_CATALOG_BYTES} bytes")
+        payload = json.loads(data.decode("utf-8"))
     else:
         payload = json.loads(Path(source).expanduser().read_text(encoding="utf-8"))
     if not isinstance(payload, dict):

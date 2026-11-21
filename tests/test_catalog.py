@@ -23,6 +23,7 @@ from ringer import (  # noqa: E402
     CatalogRefreshResult,
     EvalConfig,
     catalog_changes_path,
+    fetch_catalog_payload,
     normalize_catalog_payload,
     refresh_openrouter_catalog,
     run_catalog_command,
@@ -70,6 +71,15 @@ class CatalogTests(unittest.TestCase):
     def restore_env(self) -> None:
         os.environ.clear()
         os.environ.update(self.old_env)
+
+    def test_remote_catalog_size_limit(self) -> None:
+        data = b'{"data":[]}'
+        with mock.patch("ringer.MAX_CATALOG_BYTES", len(data)):
+            with mock.patch("urllib.request.urlopen", return_value=io.BytesIO(data)):
+                self.assertEqual(fetch_catalog_payload("https://example.invalid/models"), {"data": []})
+            with mock.patch("urllib.request.urlopen", return_value=io.BytesIO(data + b" ")):
+                with self.assertRaisesRegex(ValueError, "catalog response exceeds"):
+                    fetch_catalog_payload("https://example.invalid/models")
 
     def test_pricing_per_m_and_free_detection(self) -> None:
         models = normalize_catalog_payload(

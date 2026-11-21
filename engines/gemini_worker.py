@@ -111,6 +111,10 @@ def build_exec_args(argv: list[str]) -> tuple[list[str], dict[str, str], str]:
             agy_bin = resolved
     normalized_model = normalize_model(model, effort)
     agy_effort = AGY_EFFORT_FLAG_MAP.get(effort.strip().lower(), "medium")
+    for suffix in ("low", "medium", "high"):
+        if normalized_model.lower().endswith(f"-{suffix}"):
+            agy_effort = suffix
+            break
     cmd = [
         agy_bin,
         "-p",

@@ -25,11 +25,28 @@ ASTRA_PRICING_DATE = "2026-09-05"
 ASTRA_CREDIT_SOURCE = "https://learn.chatgpt.com/docs/pricing"
 MILLION = Decimal(1_000_000)
 OPENCODE_PART_COST_SOURCE = "https://github.com/anomalyco/opencode/blob/v1.18.20/packages/opencode/src/session/session.ts#L321"
+GEMINI_API_PRICING_SOURCE = "https://ai.google.dev/gemini-api/docs/pricing"
+GEMINI_API_PRICING_DATE = "2026-11-21"
+GEMINI_CREDIT_LEDGER_FILE = "gemini-credit-reservations.json"
 
 
 def _rates(input_: str, cached: str, write: str, output: str) -> dict[str, Decimal]:
     return dict(zip(("input", "cached", "cache_write", "output"),
                     map(Decimal, (input_, cached, write, output))))
+
+
+# Conservative standard Google AI Studio rates (USD per 1M tokens) so credit
+# reservations never understate actual invoice draw-down.
+GEMINI_API_RATES = {
+    "google/gemini-3.8-flash": _rates("1.5", "0.075", "1.5", "7.5"),
+    "google/gemini-4-hydrogen": _rates("1.5", "0.075", "1.5", "7.5"),
+    "google/gemini-4-neon": _rates("3", "0.15", "3", "15"),
+    "google/gemini-4-argon": _rates("4", "0.2", "4", "20"),
+    "google/gemini-4-carbon": _rates("4", "0.2", "4", "20"),
+    "google/gemini-3.1-pro-preview": _rates("4", "0.2", "4", "20"),
+    "google/gemini-2.5-pro": _rates("2.5", "0.25", "2.5", "15"),
+    "google/gemini-2.5-flash": _rates("0.3", "0.03", "0.3", "2.5"),
+}
 
 
 RATES = {
@@ -160,7 +177,9 @@ def validate_cost_policy(raw: Any) -> dict[str, Any]:
     allowed = {"monthly_api_cap_gbp", "run_api_cap_gbp", "automatic_paid_fallback",
                "subscription_auth_modes", "fx", "monthly_subscription_gbp",
                "subscription_fee_evidence", "snapshot_max_age_seconds", "pricing",
-               "task_api_cap_gbp", "paid_retries"}
+               "task_api_cap_gbp", "paid_retries",
+               "gemini_credit_fallback", "monthly_gemini_api_cap_usd",
+               "run_gemini_api_cap_usd", "task_gemini_api_cap_usd"}
     if any(not isinstance(key, str) for key in raw):
         raise ValueError("cost policy keys must be strings")
     if set(raw) - allowed:
@@ -168,18 +187,24 @@ def validate_cost_policy(raw: Any) -> dict[str, Any]:
     fallback = raw.get("automatic_paid_fallback", False)
     if type(fallback) is not bool:
         raise ValueError("automatic_paid_fallback must be boolean")
+    gemini_fallback = raw.get("gemini_credit_fallback", False)
+    if type(gemini_fallback) is not bool:
+        raise ValueError("gemini_credit_fallback must be boolean")
     modes = raw.get("subscription_auth_modes", ["chatgpt"])
-    if not isinstance(modes, list) or any(mode != "chatgpt" for mode in modes):
-        raise ValueError("subscription_auth_modes may only contain chatgpt")
+    if not isinstance(modes, list) or any(mode not in {"chatgpt", "antigravity"} for mode in modes):
+        raise ValueError("subscription_auth_modes may only contain chatgpt or antigravity")
     age = raw.get("snapshot_max_age_seconds", 900)
     if _count(age) is None or age == 0:
         raise ValueError("snapshot_max_age_seconds must be a positive integer")
     result = {"monthly_api_cap_gbp": str(_decimal(raw.get("monthly_api_cap_gbp", 0), "cap")),
-              "automatic_paid_fallback": fallback, "subscription_auth_modes": sorted(set(modes)),
+              "automatic_paid_fallback": fallback,
+              "gemini_credit_fallback": gemini_fallback,
+              "subscription_auth_modes": sorted(set(modes)),
               "snapshot_max_age_seconds": age}
-    for key in ("run_api_cap_gbp", "monthly_subscription_gbp", "task_api_cap_gbp"):
+    for key in ("run_api_cap_gbp", "monthly_subscription_gbp", "task_api_cap_gbp",
+                "monthly_gemini_api_cap_usd", "run_gemini_api_cap_usd", "task_gemini_api_cap_usd"):
         if key in raw:
-            result[key] = str(_decimal(raw[key], key, positive=key == "task_api_cap_gbp"))
+            result[key] = str(_decimal(raw[key], key, positive=key in {"task_api_cap_gbp", "task_gemini_api_cap_usd"}))
     if "paid_retries" in raw:
         if type(raw["paid_retries"]) is not bool:
             raise ValueError("paid_retries must be boolean")
@@ -217,8 +242,9 @@ def validate_cost_policy(raw: Any) -> dict[str, Any]:
 
 
 def inspect_usage_snapshot(snapshot: Any, *, now: datetime | None = None,
-                           max_age_seconds: int = 900) -> QuotaEvidence:
-    """Require fresh sanitised codex limit evidence; never infer remaining tokens."""
+                           max_age_seconds: int = 900,
+                           limit_key: str = "codex") -> QuotaEvidence:
+    """Require fresh sanitised subscription limit evidence; never infer remaining tokens."""
     try:
         if _count(max_age_seconds) is None or max_age_seconds == 0:
             raise ValueError("snapshot age limit must be a positive integer")
@@ -232,9 +258,9 @@ def inspect_usage_snapshot(snapshot: Any, *, now: datetime | None = None,
         if "exhausted" in snapshot and type(snapshot["exhausted"]) is not bool:
             raise ValueError("exhausted must be boolean")
         limits = snapshot.get("rateLimitsByLimitId")
-        if not isinstance(limits, dict) or not isinstance(limits.get("codex"), dict):
-            raise ValueError("codex quota limits are missing")
-        limit = limits["codex"]
+        if not isinstance(limits, dict) or not isinstance(limits.get(limit_key), dict):
+            raise ValueError(f"{limit_key} quota limits are missing")
+        limit = limits[limit_key]
         spend = limit.get("spendControlReached")
         if spend is not None and type(spend) is not bool:
             raise ValueError("spendControlReached must be boolean or null")
@@ -339,6 +365,14 @@ def estimate_event(event: UsageEvent, *, category: str = "api",
         amount = _charge(inp, cached, write, out, rates)
         return CostResult("estimate", amount, "USD", f"{override['source']}#{override['dated']}",
                           "configured-standard-comparison", lower=amount, upper=amount)
+    gemini_rates = GEMINI_API_RATES.get((event.model or "").strip().lower())
+    if gemini_rates is not None:
+        if tier not in (None, "standard"):
+            return _unknown("Gemini AI Studio rates cover standard service only")
+        amount = _charge(inp, cached, write, out, gemini_rates)
+        return CostResult("estimate", amount, "USD",
+                          f"{GEMINI_API_PRICING_SOURCE}#{GEMINI_API_PRICING_DATE}",
+                          "gemini-api-standard", lower=amount, upper=amount)
     if not model:
         return _unknown("exact model identity has no dated pricing")
     if tier not in {"standard", "fast"}:
@@ -503,9 +537,9 @@ class SpendLedger:
     validated token overruns each block further dispatch in that month.
     Unknown settlement stays held.
     """
-    def __init__(self, state_dir: Path):
-        self.path = Path(state_dir) / "cost-reservations.json"
-        self.lock_path = Path(state_dir) / "cost-reservations.lock"
+    def __init__(self, state_dir: Path, *, filename: str = "cost-reservations.json"):
+        self.path = Path(state_dir) / filename
+        self.lock_path = Path(state_dir) / Path(filename).with_suffix(".lock").name
         missing = []
         parent = self.path.parent
         while not parent.exists():
@@ -718,12 +752,39 @@ def billing_preflight(*, engine: str, model: str | None, policy: Any,
         if openrouter_task:
             route = "api"
         if route == "subscription":
+            if engine == "gemini":
+                if observed_auth_mode != "antigravity" or "antigravity" not in p["subscription_auth_modes"]:
+                    return BillingDecision(False, "subscription requires observed Antigravity keyring authentication", route)
+                evidence = inspect_usage_snapshot(usage_snapshot, now=now, max_age_seconds=p["snapshot_max_age_seconds"], limit_key="gemini")
+                return BillingDecision(evidence.available, evidence.reason, route)
             if engine not in {"codex", "chatgpt"} or observed_auth_mode != "chatgpt" or "chatgpt" not in p["subscription_auth_modes"]:
                 return BillingDecision(False, "subscription requires observed ChatGPT authentication", route)
-            evidence = inspect_usage_snapshot(usage_snapshot, now=now, max_age_seconds=p["snapshot_max_age_seconds"])
+            evidence = inspect_usage_snapshot(usage_snapshot, now=now, max_age_seconds=p["snapshot_max_age_seconds"], limit_key="codex")
             return BillingDecision(evidence.available, evidence.reason, route)
         if route != "api":
             return BillingDecision(False, "unsupported billing route; explicit credit spending is not authorised here", route)
+        if engine == "gemini-api":
+            if "fx" not in p:
+                return BillingDecision(False, "Gemini API credit cap requires fx usd_to_gbp in cost policy", route)
+            monthly_usd = _decimal(p.get("monthly_gemini_api_cap_usd", 0), "monthly_gemini_api_cap_usd")
+            if monthly_usd <= 0:
+                return BillingDecision(False, "monthly_gemini_api_cap_usd must be positive for Gemini AI Studio API dispatch", route)
+            fx_rate = _decimal(p["fx"]["usd_to_gbp"], "FX", positive=True)
+            if task_spend_allowance_gbp is None:
+                return BillingDecision(False, "paid API requires explicit task spend allowance", route)
+            allowance = _decimal(task_spend_allowance_gbp, "allowance", positive=True)
+            if not attempt_id or state_dir is None:
+                return BillingDecision(False, "paid API requires attempt ID and reservation ledger", route)
+            monthly_cap_gbp = monthly_usd * fx_rate
+            run_cap_gbp = (_decimal(p["run_gemini_api_cap_usd"], "run_gemini_api_cap_usd") * fx_rate
+                           if "run_gemini_api_cap_usd" in p else None)
+            if not SpendLedger(state_dir, filename=GEMINI_CREDIT_LEDGER_FILE).reserve(
+                attempt_id, allowance, monthly_cap_gbp,
+                month or (now or datetime.now(timezone.utc)).strftime("%Y-%m"),
+                run_id=run_id, run_cap_gbp=run_cap_gbp,
+            ):
+                return BillingDecision(False, "Gemini credit allowance unavailable, terminal reservation, recorded overspend or token bound overrun", route)
+            return BillingDecision(True, "Gemini AI Studio credit allowance reserved; separate from OpenRouter cap", route, attempt_id)
         if engine in {"codex", "chatgpt"} and observed_auth_mode != "api_key":
             return BillingDecision(False, "explicit Codex API route requires observed api_key auth", route)
         if task_spend_allowance_gbp is None:

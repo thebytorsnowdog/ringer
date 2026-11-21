@@ -59,6 +59,7 @@ from ringer_capabilities import (
     assess_explicit_route,
     missing_runtime_dependencies,
     missing_runtime_message,
+    normalize_gemini_api_model,
     parallelism_reason,
     quota_stop_message,
 )
@@ -9670,6 +9671,82 @@ class RingerRunner:
         runtime.setup_error = notice
         return notice
 
+    def _try_gemini_credit_fallback(
+        self,
+        runtime: TaskRuntime,
+        *,
+        trigger: str,
+        reason: str,
+    ) -> bool:
+        """Switch a quota-capped Gemini subscription task onto gemini-api AI Studio credits.
+
+        Applies only when the loaded billing policy explicitly enables
+        gemini_credit_fallback with a positive monthly_gemini_api_cap_usd and a
+        ready gemini-api engine. Never routes to OpenRouter and never retries
+        fallback more than once per task.
+        """
+        if runtime.quota_fallback is not None:
+            return False
+        if runtime.task.engine != "gemini" or not self._is_subscription_task(runtime.task):
+            return False
+        if "gemini-api" not in self.config.engines or self.config.billing_policy_path is None:
+            return False
+        try:
+            policy = load_billing_policy(self.config)
+        except (OSError, ValueError):
+            return False
+        if not policy or not policy.get("gemini_credit_fallback"):
+            return False
+        try:
+            monthly_cap = Decimal(str(policy.get("monthly_gemini_api_cap_usd", "0")))
+        except (InvalidOperation, ValueError):
+            return False
+        if monthly_cap <= 0:
+            return False
+        orig_engine = runtime.task.engine
+        orig_model = runtime.task.model or self.config.engines[orig_engine].model_default
+        try:
+            api_model = normalize_gemini_api_model(orig_model)
+        except ValueError:
+            return False
+        fallback_task = dataclass_replace(
+            runtime.task,
+            engine="gemini-api",
+            model=api_model,
+            billing_route="api",
+        )
+        ready_failure, _ready_detail = self._engine_ready(runtime, fallback_task)
+        if ready_failure:
+            return False
+        runtime.task = fallback_task
+        runtime.prepared_command = None
+        runtime.failure_class = None
+        runtime.setup_error = None
+        if runtime.model_assessment is not None:
+            runtime.model_assessment = {
+                **runtime.model_assessment,
+                "engine": "gemini-api",
+                "model": api_model,
+                "billing_route": "api",
+            }
+        runtime.quota_fallback = {
+            "from_engine": orig_engine,
+            "from_model": orig_model,
+            "to_engine": "gemini-api",
+            "to_model": api_model,
+            "trigger": trigger,
+            "reason": reason,
+        }
+        notice = (
+            f"[ringer.py] GEMINI CREDIT FALLBACK ({trigger}): "
+            f"{orig_engine}/{orig_model} -> gemini-api/{api_model} ({reason}). "
+            "Using Google AI Studio credits; OpenRouter was not selected."
+        )
+        append_text(runtime.log_path, notice + "\n")
+        print(notice, file=sys.stderr, flush=True)
+        self._event(runtime, "quota_fallback")
+        return True
+
     async def _execute_task(self, runtime: TaskRuntime) -> None:
         async with self.semaphore:
             runtime.started_at_monotonic = time.monotonic()
@@ -9691,11 +9768,16 @@ class RingerRunner:
                     usage_dir=self._usage_dir_for_quota_check(),
                 )
                 if capped:
-                    runtime.failure_class = "quota"
-                    await self._record_prepare_error(runtime, self._stop_quota(runtime, cap_reason))
-                    return
+                    if not self._try_gemini_credit_fallback(
+                        runtime,
+                        trigger="pre_dispatch",
+                        reason=cap_reason,
+                    ):
+                        runtime.failure_class = "quota"
+                        await self._record_prepare_error(runtime, self._stop_quota(runtime, cap_reason))
+                        return
             if (
-                runtime.task.engine in {"opencode", "openrouter"} or runtime.task.billing_route == "api"
+                runtime.task.engine in {"opencode", "openrouter", "gemini-api"} or runtime.task.billing_route == "api"
             ) and self.config.billing_policy_path is None:
                 await self._record_prepare_error(runtime, "paid dispatch requires a billing policy")
                 return
@@ -9729,6 +9811,12 @@ class RingerRunner:
                     if not runtime.admission.allowed:
                         runtime.failure_class = runtime.billing["billing_failure_class"]
                         reason = str(runtime.billing.get("billing_reason") or "billing blocked")
+                        if runtime.failure_class == "quota" and self._try_gemini_credit_fallback(
+                            runtime,
+                            trigger="pre_dispatch",
+                            reason="Gemini 5-hour or 7-day subscription quota exhausted",
+                        ):
+                            continue
                         if runtime.failure_class == "quota":
                             notice = ("Billing allowance unavailable" if "allowance unavailable" in reason
                                       else "Quota blocked billing admission")
@@ -9740,7 +9828,7 @@ class RingerRunner:
                     runtime.prepared_command = (cmd, command_spec)
                     reservation = runtime.billing.get("reservation_id")
                     if reservation:
-                        ledger = SpendLedger(self.config.state_dir)
+                        ledger = SpendLedger(self.config.state_dir, filename=runtime.admission.ledger_filename)
                         runtime.billing["reservation_status"] = "unresolved"
                         if not ledger.mark_started(reservation):
                             runtime.billing.update(billing_status="BLOCKED",
@@ -9805,11 +9893,19 @@ class RingerRunner:
                         append_text(runtime.log_path, f"[ringer.py] worktree cleanup failed: {exc}\n")
                     return
                 if runtime.failure_class == "quota":
+                    if self._try_gemini_credit_fallback(
+                        runtime,
+                        trigger="mid_run",
+                        reason="Gemini subscription quota or rate limit hit during worker attempt",
+                    ):
+                        attempt += 1
+                        max_attempts = max(max_attempts, attempt)
+                        continue
                     self._stop_quota(
                         runtime,
                         "subscription usage cap or rate limit hit during the worker attempt",
                     )
-                if runtime.task.engine in {"opencode", "openrouter"} and verdict != "PASS":
+                if runtime.task.engine in {"opencode", "openrouter", "gemini-api"} and verdict != "PASS":
                     append_text(
                         runtime.log_path,
                         "[ringer.py] no automatic paid retry. A later attempt needs a new approved delegation.\n",
@@ -11133,7 +11229,7 @@ def enforce_explicit_routes(manifest: Manifest, config: AppConfig) -> Manifest:
         raise ValueError(str(exc)) from exc
     loaded = config.billing_policy_path is not None
     for task in manifest.tasks:
-        if not loaded and (task.engine in {"opencode", "openrouter"} or task.billing_route == "api"):
+        if not loaded and (task.engine in {"opencode", "openrouter", "gemini-api"} or task.billing_route == "api"):
             raise ValueError(f"task {task.key}: paid dispatch requires a billing policy")
         engine = config.engines.get(task.engine)
         model = task.model or (engine.model_default if engine is not None else "")

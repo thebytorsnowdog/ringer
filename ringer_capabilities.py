@@ -6,18 +6,62 @@ preflight boundary and when they still have to choose a route.
 """
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
 OPENROUTER_ENGINES = frozenset({"opencode", "openrouter"})
+GEMINI_API_ENGINES = frozenset({"gemini-api"})
 NATIVE_ENGINES = ("codex", "grok", "gemini")
 
 # These defaults are the ones the worker adapters already resolve. Tests keep
 # them aligned with engines/gemini_worker.py and engines/openrouter_worker.py.
 DEFAULT_AGY_BIN = "~/.local/share/mise/installs/antigravity-cli/latest/agy"
 DEFAULT_CLAUDE_BIN = "~/.local/share/mise/installs/claude/latest/claude"
+DEFAULT_OPENCODE_BIN = "~/.local/share/mise/shims/opencode"
+
+_GEMINI_API_MODEL_ALIASES: dict[str, str] = {
+    "": "google/gemini-4-argon",
+    "auto": "google/gemini-4-argon",
+    "pro": "google/gemini-4-argon",
+    "argon": "google/gemini-4-argon",
+    "gemini-pro": "google/gemini-4-argon",
+    "gemini-4-argon": "google/gemini-4-argon",
+    "gemini-4-argon-thinking": "google/gemini-4-argon",
+    "neon": "google/gemini-4-neon",
+    "gemini-4-neon": "google/gemini-4-neon",
+    "carbon": "google/gemini-4-carbon",
+    "gemini-4-carbon": "google/gemini-4-carbon",
+    "hydrogen": "google/gemini-4-hydrogen",
+    "gemini-4-hydrogen": "google/gemini-4-hydrogen",
+    "flash": "google/gemini-3.8-flash",
+    "flash-lite": "google/gemini-3.8-flash",
+    "gemini-flash": "google/gemini-3.8-flash",
+    "gemini-3.8-flash": "google/gemini-3.8-flash",
+    "gemini-3.8-flash-thinking": "google/gemini-3.8-flash",
+}
+_GEMINI_EFFORT_SUFFIX_RE = re.compile(r"-(minimal|low|medium|high|xhigh|max)$")
+_SAFE_GEMINI_MODEL_RE = re.compile(r"^gemini-[a-z0-9][a-z0-9._-]*$")
+
+
+def normalize_gemini_api_model(model: str) -> str:
+    """Map a Gemini subscription or API model slug to an OpenCode google/<model> ID."""
+    clean = (model or "").strip().lower()
+    if clean.startswith("openrouter/"):
+        raise ValueError("gemini-api refuses openrouter/ models")
+    if "#" in clean or ":" in clean:
+        raise ValueError("gemini-api refuses model variant/tag suffixes")
+    base = clean.removeprefix("google/") if clean.startswith("google/") else clean
+    if base in _GEMINI_API_MODEL_ALIASES:
+        return _GEMINI_API_MODEL_ALIASES[base]
+    stripped = _GEMINI_EFFORT_SUFFIX_RE.sub("", base)
+    if stripped in _GEMINI_API_MODEL_ALIASES:
+        return _GEMINI_API_MODEL_ALIASES[stripped]
+    if _SAFE_GEMINI_MODEL_RE.fullmatch(stripped):
+        return f"google/{stripped}"
+    raise ValueError(f"gemini-api only accepts Gemini models (got {model!r})")
 
 OPENROUTER_NOT_SELECTED = (
     "OpenRouter was not selected and no other harness was substituted."
@@ -75,12 +119,12 @@ def subscription_probe(engine: str) -> SubscriptionProbe:
     if engine == "gemini":
         return SubscriptionProbe(
             "gemini",
-            False,
-            "Antigravity agy subscription admission is not implemented. "
-            "Documented sign-in uses the OS keyring or an interactive browser "
-            "flow, and the command list has no headless auth-status command. "
-            "GEMINI_API_KEY and GOOGLE_API_KEY are not this subscription. "
-            "The keyring is not read.",
+            True,
+            "Antigravity agy subscription evidence is the aicode.googleapis.com "
+            "v1alpha:fetchQuotaStatus reply using the OS keyring or "
+            "antigravity-oauth-token OAuth session, reduced to auth mode "
+            "antigravity and 5-hour/7-day quota windows. GEMINI_API_KEY and "
+            "GOOGLE_API_KEY are not this subscription.",
         )
     if engine == "claude":
         return SubscriptionProbe(
@@ -135,6 +179,18 @@ HARNESSES: dict[str, HarnessCapability] = {
             "before exec. The gemini CLI is a different program."
         ),
     ),
+    "gemini-api": HarnessCapability(
+        engine="gemini-api",
+        providers=frozenset({"google"}),
+        subscription_auth=None,
+        api_auth="gemini_api_key",
+        note=(
+            "Gemini AI Studio API credits via engines/gemini_api_worker.py "
+            "(sandboxed opencode google/<model> with GEMINI_API_KEY from "
+            "~/.config/ringer/gemini.key). Separate from Antigravity OAuth "
+            "subscription and OpenRouter."
+        ),
+    ),
     "claude": HarnessCapability(
         engine="claude",
         providers=frozenset({"anthropic"}),
@@ -170,7 +226,7 @@ def provider_for_model(model: str) -> str:
         return "openrouter"
     if text.startswith("grok"):
         return "xai"
-    if text.startswith("gemini"):
+    if text.startswith("gemini") or text.startswith("google/"):
         return "google"
     if text.startswith(("gpt-", "chatgpt-")) or text in {"gpt", "chatgpt"}:
         return "openai"
@@ -268,6 +324,12 @@ def assess_explicit_route(
             engine, model, "api", provider,
             f"Explicit {engine} API route. It requires observed {harness.api_auth} "
             f"auth. {harness.note}",
+        )
+    if harness.subscription_auth is None:
+        return _blocked(
+            engine, model, billing_route, provider,
+            f"Explicit {engine} route requires billing_route api. {harness.note} "
+            + OPENROUTER_NOT_SELECTED,
         )
     if billing_policy_loaded and billing_route in {None, "subscription"}:
         probe = subscription_probe(engine)
@@ -383,6 +445,9 @@ def command_available(name: str, environ: Mapping[str, str]) -> bool:
     elif name == "claude":
         if _file_exists(environ.get("RINGER_CLAUDE_BIN", ""), environ) or _file_exists(DEFAULT_CLAUDE_BIN, environ):
             return True
+    elif name == "opencode":
+        if _file_exists(environ.get("RINGER_OPENCODE_BIN", ""), environ) or _file_exists(DEFAULT_OPENCODE_BIN, environ):
+            return True
     path = environ.get("PATH")
     if path is None:
         path = ""
@@ -406,6 +471,8 @@ def declared_runtime_dependencies(bin_path: str) -> tuple[str, ...]:
     base = path.name
     if base == "gemini_worker.py":
         return ("agy",)
+    if base == "gemini_api_worker.py":
+        return ("opencode",)
     if base == "openrouter_worker.py":
         return ()
     if path.exists() and _wrapper_needs_opencode(path):

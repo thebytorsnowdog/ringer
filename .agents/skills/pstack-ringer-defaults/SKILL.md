@@ -22,15 +22,15 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
 ## 2. Who does what
 
 - **Implementation, probes, review scouts, personas, mechanical edits** go through Ringer, automatically, without asking permission or model-selection confirmation. Tell Ian what was chosen and why.
-- **Worker routing (the delegation table chooses the engine, no OpenRouter fallback).** Subscription tasks use `billing_route: "subscription"` and `service_tier: "standard"`. Codex subscription auth is ChatGPT login and is not OpenAI API credit. When a billing policy is loaded, Codex is the native engine whose subscription probe can admit a worker. Grok OAuth does not authenticate OpenAI or Gemini. Gemini subscription is the Antigravity `agy` CLI, and its worker strips API keys. A loaded billing policy stops Grok and Antigravity before a worker starts, because those probes are not implemented.
-  - From **Codex**: `engine: "codex"`. Do not require OpenCode.
-  - From **Grok**: `engine: "grok"`. A loaded billing policy stops this route, because no subscription probe is implemented.
-  - From **Gemini / Antigravity**: `engine: "gemini"` (`agy`). A loaded billing policy stops this route, because no subscription probe is implemented.
-  - **Claude is not a worker route.** There is no Claude subscription, so `engine: "claude"` is refused with or without a policy file.
-  - **Hermes is retired.** It is not an engine.
-  - Independent tasks are a swarm (`max_parallel` above 1). One task, `ask`, and tasks that share a write root stay serial. Missing CLIs are not installed. A usage cap, missing CLI, auth failure, or provider error stops that route. Do not switch to OpenRouter after a failure. Planned GLM/DeepSeek delegation is only the shortlist in `docs/DELEGATION-MATRIX.md`, inside the 2026-11-08 approval (£10 a month, £1 a swarm run, £0.25 a task, no paid retry). A budget cap is not a second approval, and coordinator review stays on the subscription route. OpenCode stays refused. Planned OpenRouter work is one completion with an explicit token bound and a reserved worst case. A missing billing policy means no paid dispatch. Set `task_class`. `registry/delegation-matrix.json` chooses the engine, and `admit()` passes `task_class`. On `bounded-detail`, an explicit shortlist model may only confirm the cheapest model or name a cheaper or equal one.
+- **Subscription routing.** Start on the originating harness with `billing_route: "subscription"` and `service_tier: "standard"`. Use `engine: "codex"` from Codex, `"grok"` from Grok, and `"gemini"` from Antigravity (`agy`). With a billing policy loaded, only Codex has a native subscription admission probe. It requires observed ChatGPT auth and fresh, available quota. OpenAI API credit is billed separately.
+  - Grok and Antigravity have no subscription admission probe on `ian`, so a loaded billing policy blocks them before dispatch. Antigravity has no subscription quota probe on `ian`. Its worker strips Gemini and Google API keys.
+  - PR #20 (`feat/gemini-api-credit-fallback`) is unmerged and awaits Ian's decision. Update the Gemini routing rule once its Antigravity `fetchQuotaStatus` subscription probe lands. The PR's Google AI Studio fallback is opt-in paid API usage, separate from the subscription route.
+  - Claude is unsupported with or without a billing policy. Hermes is retired.
+- **Quota stops.** A detected pre-dispatch cap, quota refusal at billing admission, or in-run quota failure blocks the task on its selected route. Ringer logs the notice and prints it to stderr. Report the stop to Ian and state that OpenRouter was not selected and no harness was substituted.
+- **Planned OpenRouter work.** Set `task_class` and use [the delegation matrix](../../../docs/DELEGATION-MATRIX.md) for Ian's 2026-11-08 approval. OpenRouter fails closed outside the approved `bounded-detail` GLM/DeepSeek shortlist. Plan dispatch before work starts with `engine: "openrouter"`, `billing_route: "api"`, and a loaded billing policy. The matrix chooses the cheapest eligible model. An explicit model may confirm that choice or name a cheaper or equal shortlist model. Ringer reserves the worst-case cost of one token-bounded completion within the task, run, and monthly caps. Budget caps alone confer no approval. OpenCode is refused. Any later paid attempt requires new approval. Coordinator review stays on subscription.
+- Independent tasks are a swarm (`max_parallel` above 1). One task, `ask`, and tasks that share a write root stay serial. Missing CLIs are not installed.
 - **Model-fit assessment before every model job.** Assessment is NOT user approval. Before selecting OpenRouter candidates, review catalogue and task-family evidence; refresh missing or >24h-old assessment with `python3 scripts/assess_openrouter.py --refresh --out ~/.ringer/model-assessment` (see `docs/MODEL-EVALUATION.md`). Catalogue compatibility does not prove quality. Exploration is optional. Global promotion requires 30 distinct jobs per family, 75% first-try and 85% final-check passes, plus human review.
-- **Judgement panels** (`architect` exploration, `interrogate`, arena cross-judge, picking a base) need model diversity, and their output is a decision, not a checkable artefact. Run them as Ringer `adversarial-review` jobs on engines a loaded billing policy can admit. Claude Code is unsupported.
+- **Judgement panels** (`architect` exploration, `interrogate`, arena cross-judge, picking a base) need model diversity, and their output is a decision, not a checkable artefact. Run them as Ringer `adversarial-review` jobs on engines a loaded billing policy can admit.
 - **Arena on code** is split. Candidates are Ringer tasks (same spec, different models, separate worktrees). Judging, picking and grafting stay with the coordinator plus the pstack cross-judge.
 - **Workers never orchestrate.** Specs carry every hard rule. Do not load these defaults into worker prompts.
 
@@ -63,18 +63,10 @@ Escalate on doubt. A second edit pass on the same problem is a loop, and loops g
 9. Honour `~/.config/ai/CONSTITUTION.md` and `~/.config/ai/context.md` across every session, and load `~/.config/ai/TELOS.md` on demand when advising on strategy, architecture, communication, or personal/wellbeing decisions.
 10. Standardise all Git commits and GitHub attribution on `user.name = Snowy` and `user.email = 215750096+thebytorsnowdog@users.noreply.github.com` (never a personal real name or personal email address).
 
-## 5. Host adapters
+## 5. Ringside and fork sync
 
-Codex, Grok, and Gemini keep separate subscription auth. OpenRouter is never an automatic fallback. Claude is unsupported. Hermes is retired.
+- Launch Ringside or the per-run dashboard through Ringer to get an authenticated session. Both bind to loopback and require a matching loopback `Host` for the listening port. Private data, logs, and artifacts require the per-launch `X-Ringer-Token` credential. The browser launcher supplies a derived session token. Ringside's open-folder POST also checks `Origin` against the same-port browser and approved native HUD origins, and native CORS preflight checks `Host` and the native origin.
+- Follow [the fork guide](../../../docs/fork/README.md). Keep `main` a fast-forward mirror of upstream. The sync workflow publishes a tested `fork-sync/*` PR into protected `ian`. Review it and use **Create a merge commit**, never squash, to preserve upstream history and contributor credit. Land changes to `ian` through PRs.
 
-| Host | pstack | Ringer |
-|---|---|---|
-| Antigravity | Read the leaf files under `~/.agents/open-pstack`. Panels run as Ringer `adversarial-review` (pstack's launcher needs `bun`, not installed). | `~/.agents/skills/ringer` via shell plus `ringer_nudge_antigravity.py` hook (`engine: "gemini"`). A loaded billing policy stops this worker before it starts. |
-| Grok | Panellist or worker; read leaf files from `~/.agents/open-pstack` when needed | worker and CLI harness (`engine: "grok"`). A loaded billing policy stops this worker before it starts. |
-| Codex | Coordinator or worker | worker engine `codex`. This is the native engine with a subscription probe. |
-| OpenCode | Historical wrapper. Admission refuses paid dispatch. | `engine: "opencode"` is refused. Paid OpenRouter work uses `engine: "openrouter"`. |
-
-Claude Code and Hermes are historical. `./ringer.py install-agent` requires `--codex` and does not write `.claude`. `./ringer.py uninstall-agent --claude` removes a leftover Claude install.
-
-pstack leaf files: `~/.agents/open-pstack/plugins/pstack/skills/<name>/SKILL.md`. The old `~/.claude/plugins/marketplaces/open-pstack` path is historical.
-Ringer: `~/Work/GitHub/ringer` (branch `ian`). Load skill `ringer` when orchestrating.
+Read pstack leaf files from `~/.agents/open-pstack/plugins/pstack/skills/<name>/SKILL.md`.
+Load skill `ringer` when orchestrating from the Ringer checkout.

@@ -17,7 +17,7 @@ import ringer
 import ringer_billing
 from engines import gemini_api_worker as worker
 from ringer_capabilities import assess_explicit_route, normalize_gemini_api_model
-from ringer_costs import GEMINI_CREDIT_LEDGER_FILE, validate_cost_policy
+from ringer_costs import GEMINI_CREDIT_LEDGER_FILE, MAX_MONTHLY_GEMINI_API_CAP_USD, SpendLedger, validate_cost_policy
 from tests.test_antigravity_quota_probe import quota_buckets, quota_payload
 
 
@@ -134,6 +134,7 @@ class GeminiCreditFallbackRunnerTests(unittest.TestCase):
         api_script: str,
         model: str = "gemini-4-argon-medium",
         allowance: float | None = None,
+        init_gemini_ledger: bool = True,
     ) -> ringer.RingerRunner:
         sub_bin = self._stub("sub-gemini.sh", sub_script)
         api_bin = self._stub("api-gemini.sh", api_script)
@@ -203,6 +204,10 @@ class GeminiCreditFallbackRunnerTests(unittest.TestCase):
             ),
             billing_policy_path=policy_path,
         )
+        if init_gemini_ledger:
+            SpendLedger(
+                config.state_dir, filename=GEMINI_CREDIT_LEDGER_FILE, missing="fail",
+            ).initialize_empty()
         return ringer.RingerRunner(manifest, config, "test", dashboard_enabled=False)
 
     def _api_pass_script(self) -> str:
@@ -221,11 +226,12 @@ class GeminiCreditFallbackRunnerTests(unittest.TestCase):
         )
         return f"printf 'api-ok\\n' > out.txt\nprintf '%s\\n' '{step}'"
 
-    def _run(self, *, payload=None, sub_script="exit 1", api_script=None, allowance=None, **policy):
+    def _run(self, *, payload=None, sub_script="exit 1", api_script=None, allowance=None,
+             init_gemini_ledger=True, **policy):
         runner = self._make_runner(
             policy_path=self._policy(**policy), sub_script=sub_script,
             api_script=self._api_pass_script() if api_script is None else api_script,
-            allowance=allowance,
+            allowance=allowance, init_gemini_ledger=init_gemini_ledger,
         )
 
         async def observe(**_kwargs):
@@ -341,3 +347,38 @@ class GeminiCreditFallbackRunnerTests(unittest.TestCase):
         self.assertEqual((1, "blocked", 0), (code, runtime.status, runtime.attempts))
         self.assertIn("exceeds the Gemini AI Studio task cap", runtime.billing["billing_reason"])
         self.assertEqual([], self._ledger_rows())
+
+    def test_monthly_gemini_cap_cannot_exceed_forty(self):
+        policy = {
+            "monthly_api_cap_gbp": "10",
+            "run_api_cap_gbp": "1",
+            "task_api_cap_gbp": "0.25",
+            "automatic_paid_fallback": False,
+            "gemini_credit_fallback": True,
+            "monthly_gemini_api_cap_usd": "40.01",
+            "run_gemini_api_cap_usd": "10",
+            "task_gemini_api_cap_usd": "2",
+        }
+        with self.assertRaisesRegex(ValueError, "monthly_gemini_api_cap_usd must be at most 40"):
+            validate_cost_policy(policy)
+        policy["monthly_gemini_api_cap_usd"] = str(MAX_MONTHLY_GEMINI_API_CAP_USD)
+        self.assertEqual("40", validate_cost_policy(policy)["monthly_gemini_api_cap_usd"])
+
+    def test_missing_gemini_ledger_fails_closed_without_retries(self):
+        code, runtime, _, _ = self._run(payload=quota_payload(primary=0), init_gemini_ledger=False)
+        self.assertEqual((1, "blocked", 0), (code, runtime.status, runtime.attempts))
+        self.assertIn("is missing; refusing to reserve or settle paid spend", runtime.billing["billing_reason"])
+        self.assertFalse((self.root / "state" / GEMINI_CREDIT_LEDGER_FILE).exists())
+        self.assertEqual([], self._ledger_rows())
+
+    def test_unreadable_gemini_ledger_fails_closed_without_retries(self):
+        path = self.root / "state"
+        path.mkdir(parents=True, exist_ok=True)
+        (path / GEMINI_CREDIT_LEDGER_FILE).write_text("{not-json", encoding="utf-8")
+        code, runtime, _, _ = self._run(payload=quota_payload(primary=0), init_gemini_ledger=False)
+        self.assertEqual((1, "blocked", 0), (code, runtime.status, runtime.attempts))
+        self.assertTrue(runtime.billing["billing_reason"])
+        self.assertEqual("{not-json", (path / GEMINI_CREDIT_LEDGER_FILE).read_text(encoding="utf-8"))
+        # The file is unreadable as a ledger, so no reservation can be added.
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads((path / GEMINI_CREDIT_LEDGER_FILE).read_text(encoding="utf-8"))

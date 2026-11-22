@@ -771,7 +771,10 @@ def settle_admission(admission: Admission, state_dir: Path, usage: dict[str, Any
     if identity is None:
         return
     evidence["reservation_status"] = "unresolved"
-    ledger = SpendLedger(state_dir, filename=admission.ledger_filename)
+    ledger = SpendLedger(
+        state_dir, filename=admission.ledger_filename,
+        missing="fail" if admission.ledger_filename == GEMINI_CREDIT_LEDGER_FILE else "empty",
+    )
     if admission.openrouter_bounds is not None and usage.get("token_bound_exceeded") is True:
         if not ledger.record_token_overrun(identity):
             raise ValueError("could not record a token overrun for the started reservation")

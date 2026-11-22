@@ -44,7 +44,7 @@ from ringer_billing import (
     Admission, admit, billing_policy_path, codex_subscription_env, enforce_codex_command,
     gemini_fallback_enabled, task_billing_fields, usage_evidence, settle_admission,
 )
-from ringer_costs import SpendLedger, validate_cost_policy
+from ringer_costs import GEMINI_CREDIT_LEDGER_FILE, SpendLedger, validate_cost_policy
 from ringer_delegation import TableRouteError, route_from_table
 from ringer_routing import (
     ASSESSMENT_SCHEMA,
@@ -6878,7 +6878,10 @@ class RingerRunner:
                     runtime.prepared_command = (cmd, command_spec)
                     reservation = runtime.billing.get("reservation_id")
                     if reservation:
-                        ledger = SpendLedger(self.config.state_dir, filename=runtime.admission.ledger_filename)
+                        ledger = SpendLedger(
+                            self.config.state_dir, filename=runtime.admission.ledger_filename,
+                            missing="fail" if runtime.admission.ledger_filename == GEMINI_CREDIT_LEDGER_FILE else "empty",
+                        )
                         runtime.billing["reservation_status"] = "unresolved"
                         if not ledger.mark_started(reservation):
                             runtime.billing.update(billing_status="BLOCKED",

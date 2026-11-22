@@ -1,16 +1,21 @@
 """Executed billing boundary. Local fixtures need no account when billing is off.
 
-No credential files, login changes, model calls or implicit route fallback here.
+Read-only account probes make no login changes, model calls or route switches.
 Account replies are reduced to auth/plan/quota before crossing this boundary.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import http.client
 import json
 import math
 import os
 import signal
+import subprocess
+import sys
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -20,6 +25,8 @@ from typing import Any
 from ringer_capabilities import OPENROUTER_NOT_SELECTED, subscription_probe
 from ringer_costs import SpendLedger, billing_preflight, estimate_event, parse_usage_lines, validate_cost_policy
 from ringer_delegation import catalogue_usd, prepare_openrouter_dispatch
+
+GEMINI_QUOTA_URL = "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus"
 
 
 def task_billing_fields(obj: dict[str, Any], key: str) -> dict[str, Any]:
@@ -46,6 +53,10 @@ def billing_policy_path(raw: Any, config_path: Path) -> Path | None:
 
 
 class AccountEvidenceError(ValueError):
+    pass
+
+
+class GeminiQuotaEvidenceError(AccountEvidenceError):
     pass
 
 
@@ -194,6 +205,155 @@ async def observe_codex_account(binary: str, cwd: Path, *, timeout_s: float = 10
             await _close_server(proc)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _gemini_reset_epoch(value: Any, window: str) -> int:
+    if isinstance(value, str):
+        with contextlib.suppress(ValueError, OverflowError, OSError):
+            reset = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            if reset.utcoffset() is not None and (epoch := reset.timestamp()) >= 0:
+                return int(epoch)
+    raise GeminiQuotaEvidenceError(f"Gemini {window} quota resetTime must be a valid ISO timestamp with timezone")
+
+
+def parse_gemini_quota_status(payload: Any, *, now: datetime | None = None) -> dict[str, Any]:
+    """Reduce fetchQuotaStatus to fresh, sanitised 5-hour and weekly quota evidence."""
+    if not isinstance(payload, dict) or "error" in payload:
+        raise GeminiQuotaEvidenceError("Gemini quota response must be an object without an error")
+    summary = payload.get("quotaSummary")
+    groups = summary.get("groups") if isinstance(summary, dict) else None
+    if not isinstance(groups, list) or not groups:
+        raise GeminiQuotaEvidenceError("Gemini quotaSummary.groups must be a non-empty list")
+
+    by_id = {"gemini-5h": "primary", "gemini-weekly": "secondary"}
+    by_label = {"5h": "primary", "weekly": "secondary", "7d": "secondary"}
+    gemini_groups = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("displayName", ""), str):
+            raise GeminiQuotaEvidenceError("Gemini quota group or displayName is invalid")
+        buckets = group.get("buckets", [])
+        if not isinstance(buckets, list) or any(not isinstance(bucket, dict) for bucket in buckets):
+            raise GeminiQuotaEvidenceError("Gemini quota group buckets must be a list of objects")
+        if "gemini" in group.get("displayName", "").lower() or any(
+            isinstance(bucket.get("bucketId"), str) and bucket["bucketId"].strip().lower() in by_id
+            for bucket in buckets
+        ):
+            gemini_groups.append(buckets)
+    if len(gemini_groups) != 1:
+        raise GeminiQuotaEvidenceError("Gemini Models quota group is missing or ambiguous")
+
+    windows = {"primary": ("5-hour", 300), "secondary": ("weekly", 10080)}
+    limits = {}
+    for bucket in gemini_groups[0]:
+        bucket_id = bucket.get("bucketId", "")
+        label = bucket.get("refreshWindowLabel", "")
+        disabled = bucket.get("disabled", False)
+        if not isinstance(bucket_id, str) or not isinstance(label, str) or type(disabled) is not bool:
+            raise GeminiQuotaEvidenceError("Gemini quota bucket identifier, label or disabled flag is invalid")
+        id_slot = by_id.get(bucket_id.strip().lower())
+        label_slot = by_label.get(label.strip().lower())
+        slot = id_slot or label_slot
+        if slot is None:
+            continue
+        window, duration = windows[slot]
+        if (id_slot and label_slot and id_slot != label_slot) or slot in limits:
+            raise GeminiQuotaEvidenceError(f"Gemini {window} quota bucket is ambiguous")
+        if disabled:
+            raise GeminiQuotaEvidenceError(f"Gemini {window} quota bucket is disabled")
+        reset = _gemini_reset_epoch(bucket.get("resetTime", bucket.get("reset_time")), window)
+        remaining = bucket.get("remainingFraction", bucket.get("remaining_fraction"))
+        if (
+            type(remaining) not in (int, float, Decimal)
+            or (isinstance(remaining, Decimal) and not remaining.is_finite())
+            or not 0 <= remaining <= 1
+        ):
+            raise GeminiQuotaEvidenceError(f"Gemini {window} quota remainingFraction must be a number from 0 to 1")
+        used = (1 - float(remaining)) * 100
+        if remaining > 0:
+            # Float subtraction can still round a positive balance to 100% used.
+            used = min(used, math.nextafter(100.0, 0.0))
+        limits[slot] = {"usedPercent": used, "windowDurationMins": duration, "resetsAt": reset}
+    for slot, (window, _) in windows.items():
+        if slot not in limits:
+            raise GeminiQuotaEvidenceError(f"Gemini {window} quota bucket is missing")
+    return {
+        "observed_auth_mode": "antigravity",
+        "plan_type": "antigravity",
+        "observed_at": (now or datetime.now(timezone.utc)).isoformat(),
+        "rateLimitsByLimitId": {"gemini": limits},
+    }
+
+
+def _read_antigravity_access_token(*, timeout_s: float) -> str:
+    """Read the agy OAuth session from the OS keyring or its local token file."""
+    lookup_cmd = (
+        ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]
+        if sys.platform == "darwin"
+        else ["secret-tool", "lookup", "service", "gemini", "username", "antigravity"]
+    )
+    data = None
+    with contextlib.suppress(OSError, ValueError, RecursionError, subprocess.SubprocessError):
+        raw = subprocess.check_output(
+            lookup_cmd, text=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=min(timeout_s, 3.0),
+        )
+        data = json.loads(raw)
+    if not isinstance(data, dict):
+        agy_dir = Path(os.environ.get("AGY_DIR") or (Path.home() / ".gemini" / "antigravity-cli"))
+        with contextlib.suppress(OSError, ValueError, RecursionError):
+            data = json.loads((agy_dir / "antigravity-oauth-token").read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise AccountEvidenceError("Antigravity keyring or local OAuth login is missing or locked")
+    token = data.get("access_token")
+    nested = data.get("token")
+    if isinstance(nested, dict):
+        token = nested.get("access_token", token)
+    token = token.strip() if isinstance(token, str) else ""
+    if not token or any(c.isspace() for c in token):
+        raise AccountEvidenceError("Antigravity OAuth access token is missing or invalid")
+    return token
+
+
+def _fetch_gemini_quota_sync(timeout_s: float) -> dict[str, Any]:
+    token = _read_antigravity_access_token(timeout_s=timeout_s)
+    request = urllib.request.Request(
+        GEMINI_QUOTA_URL,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout_s) as response:
+            if response.status != 200:
+                raise GeminiQuotaEvidenceError(f"Gemini quota probe returned HTTP {response.status}")
+            body = response.read(1_000_001)
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise GeminiQuotaEvidenceError(f"Gemini quota probe returned HTTP {exc.code}") from None
+    if len(body) > 1_000_000:
+        raise GeminiQuotaEvidenceError("Gemini quota response exceeded read limit")
+    try:
+        # Keep the wire value exact until the fraction is range-checked.
+        payload = json.loads(body, parse_float=Decimal)
+    except (ValueError, ArithmeticError, RecursionError):
+        raise GeminiQuotaEvidenceError("Gemini quota response is malformed JSON") from None
+    return parse_gemini_quota_status(payload)
+
+
+async def observe_gemini_account(*, timeout_s: float = 10) -> dict[str, Any]:
+    """Read the Antigravity subscription quota without retaining the token or raw reply."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_fetch_gemini_quota_sync, timeout_s), timeout_s)
+    except asyncio.TimeoutError:
+        raise GeminiQuotaEvidenceError("Gemini subscription quota probe timed out") from None
+    except AccountEvidenceError:
+        raise
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        raise GeminiQuotaEvidenceError(f"Gemini subscription quota unavailable ({type(exc).__name__})") from None
+
+
 def enforce_codex_command(command: list[str], model: str | None, route: str, spec: str) -> list[str]:
     """Reject ambiguous routing, then force the required auth on the actual argv.
 
@@ -339,7 +499,10 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
         # Re-read policy for each attempt, so a reduced cap takes effect on retry.
         policy = validate_cost_policy(json.loads(policy_path.read_text(encoding="utf-8")))
         if route is None:
-            return blocked("billing requires an explicit billing_route", "permission")
+            reason = "billing requires an explicit billing_route"
+            if engine == "gemini":
+                reason += ". " + OPENROUTER_NOT_SELECTED
+            return blocked(reason, "permission")
         if not model:
             return blocked("billing requires an explicit task model", "permission")
         if engine == "codex":
@@ -369,7 +532,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 "no Claude subscription is available. " + OPENROUTER_NOT_SELECTED,
                 "permission",
             )
-        elif engine in {"grok", "gemini"}:
+        elif engine == "grok":
             probe = subscription_probe(engine)
             if route == "api":
                 return blocked(
@@ -377,6 +540,14 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                     "permission",
                 )
             return blocked(probe.reason, "permission")
+        elif engine == "gemini":
+            if route != "subscription":
+                return blocked("gemini has no API-key route. " + OPENROUTER_NOT_SELECTED, "permission")
+            if "antigravity" not in policy["subscription_auth_modes"]:
+                return blocked(
+                    "Antigravity keyring OAuth must be enabled in subscription_auth_modes. " + OPENROUTER_NOT_SELECTED,
+                    "permission",
+                )
         else:
             return blocked("billing auth evidence unavailable for this engine", "permission")
         if route == "api" and "run_api_cap_gbp" not in policy:
@@ -398,6 +569,8 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
             # dispatch.
             snapshot = {"observed_auth_mode": None, "plan_type": None,
                         "observed_at": None, "rateLimitsByLimitId": {}}
+        elif engine == "gemini":
+            snapshot = await observe_gemini_account(timeout_s=timeout_s)
         else:
             snapshot = await observe_codex_account(binary, taskdir, timeout_s=timeout_s,
                                                    require_quota=route == "subscription",
@@ -423,6 +596,8 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                         reservation_id=decision.reservation_id,
                         reservation_status="reserved" if decision.reservation_id else "not_applicable")
         return Admission(True, evidence, policy, openrouter_bounds), command
+    except GeminiQuotaEvidenceError as exc:
+        return blocked(str(exc), "quota")
     except AccountEvidenceError as exc:
         return blocked(str(exc), "permission")
     except (ValueError, TypeError, OSError) as exc:

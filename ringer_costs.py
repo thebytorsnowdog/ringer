@@ -169,8 +169,8 @@ def validate_cost_policy(raw: Any) -> dict[str, Any]:
     if type(fallback) is not bool:
         raise ValueError("automatic_paid_fallback must be boolean")
     modes = raw.get("subscription_auth_modes", ["chatgpt"])
-    if not isinstance(modes, list) or any(mode != "chatgpt" for mode in modes):
-        raise ValueError("subscription_auth_modes may only contain chatgpt")
+    if not isinstance(modes, list) or any(mode not in ("chatgpt", "antigravity") for mode in modes):
+        raise ValueError("subscription_auth_modes may only contain chatgpt or antigravity")
     age = raw.get("snapshot_max_age_seconds", 900)
     if _count(age) is None or age == 0:
         raise ValueError("snapshot_max_age_seconds must be a positive integer")
@@ -217,8 +217,9 @@ def validate_cost_policy(raw: Any) -> dict[str, Any]:
 
 
 def inspect_usage_snapshot(snapshot: Any, *, now: datetime | None = None,
-                           max_age_seconds: int = 900) -> QuotaEvidence:
-    """Require fresh sanitised codex limit evidence; never infer remaining tokens."""
+                           max_age_seconds: int = 900,
+                           limit_key: str = "codex") -> QuotaEvidence:
+    """Require fresh sanitised subscription quota evidence."""
     try:
         if _count(max_age_seconds) is None or max_age_seconds == 0:
             raise ValueError("snapshot age limit must be a positive integer")
@@ -232,9 +233,11 @@ def inspect_usage_snapshot(snapshot: Any, *, now: datetime | None = None,
         if "exhausted" in snapshot and type(snapshot["exhausted"]) is not bool:
             raise ValueError("exhausted must be boolean")
         limits = snapshot.get("rateLimitsByLimitId")
-        if not isinstance(limits, dict) or not isinstance(limits.get("codex"), dict):
-            raise ValueError("codex quota limits are missing")
-        limit = limits["codex"]
+        if not isinstance(limits, dict) or not isinstance(limits.get(limit_key), dict):
+            raise ValueError(f"{limit_key} quota limits are missing")
+        limit = limits[limit_key]
+        if limit_key == "gemini" and limit.get("secondary") is None:
+            raise ValueError("Gemini weekly quota window is missing")
         spend = limit.get("spendControlReached")
         if spend is not None and type(spend) is not bool:
             raise ValueError("spendControlReached must be boolean or null")
@@ -717,10 +720,19 @@ def billing_preflight(*, engine: str, model: str | None, policy: Any,
         # An explicit OpenRouter task is API spend. A subscription label was refused above.
         if openrouter_task:
             route = "api"
+        if engine == "gemini" and route != "subscription":
+            return BillingDecision(False, "gemini has no API-key route", route)
         if route == "subscription":
-            if engine not in {"codex", "chatgpt"} or observed_auth_mode != "chatgpt" or "chatgpt" not in p["subscription_auth_modes"]:
+            limit_key = "codex"
+            if engine == "gemini":
+                if observed_auth_mode != "antigravity" or "antigravity" not in p["subscription_auth_modes"]:
+                    return BillingDecision(False, "subscription requires observed Antigravity OAuth authentication", route)
+                limit_key = "gemini"
+            elif engine not in {"codex", "chatgpt"} or observed_auth_mode != "chatgpt" or "chatgpt" not in p["subscription_auth_modes"]:
                 return BillingDecision(False, "subscription requires observed ChatGPT authentication", route)
-            evidence = inspect_usage_snapshot(usage_snapshot, now=now, max_age_seconds=p["snapshot_max_age_seconds"])
+            evidence = inspect_usage_snapshot(
+                usage_snapshot, now=now, max_age_seconds=p["snapshot_max_age_seconds"], limit_key=limit_key,
+            )
             return BillingDecision(evidence.available, evidence.reason, route)
         if route != "api":
             return BillingDecision(False, "unsupported billing route; explicit credit spending is not authorised here", route)

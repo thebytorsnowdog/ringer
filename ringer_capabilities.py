@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from engines.gemini_api_worker import normalize_gemini_api_model, resolve_opencode
+
 OPENROUTER_ENGINES = frozenset({"opencode", "openrouter"})
 NATIVE_ENGINES = ("codex", "grok", "gemini")
 
@@ -199,6 +201,16 @@ def assess_explicit_route(
     billing_policy_loaded: bool = False,
 ) -> RouteDecision:
     """Accept the named engine, or block it. Never returns a different engine."""
+    if engine == "gemini-api":
+        if billing_route != "api" or not billing_policy_loaded:
+            return _blocked(engine, model, billing_route, "google",
+                            "Gemini AI Studio requires billing_route api and a billing policy.")
+        try:
+            canonical = normalize_gemini_api_model(model)
+        except ValueError as exc:
+            return _blocked(engine, model, billing_route, "google", str(exc))
+        return _allowed(engine, canonical, "api", "google",
+                        "Explicit Gemini AI Studio route with a separate credit ledger.")
     provider = provider_for_model(model)
     if engine == "claude" or provider == "anthropic":
         return _blocked(
@@ -404,6 +416,8 @@ def declared_runtime_dependencies(bin_path: str) -> tuple[str, ...]:
     base = path.name
     if base == "gemini_worker.py":
         return ("agy",)
+    if base == "gemini_api_worker.py":
+        return ("opencode",)
     if base == "openrouter_worker.py":
         return ()
     if path.exists() and _wrapper_needs_opencode(path):
@@ -415,6 +429,8 @@ def declared_runtime_dependencies(bin_path: str) -> tuple[str, ...]:
 
 def missing_runtime_dependencies(bin_path: str, environ: Mapping[str, str] | None = None) -> tuple[str, ...]:
     env = environ if environ is not None else {}
+    if Path(bin_path).name == "gemini_api_worker.py":
+        return () if resolve_opencode(dict(env)) else ("opencode",)
     return tuple(
         name for name in declared_runtime_dependencies(bin_path) if not command_available(name, env)
     )

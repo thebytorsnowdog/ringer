@@ -22,8 +22,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from ringer_capabilities import OPENROUTER_NOT_SELECTED, subscription_probe
-from ringer_costs import SpendLedger, billing_preflight, estimate_event, parse_usage_lines, validate_cost_policy
+from engines.gemini_api_worker import parse_args as parse_gemini_api_args
+from ringer_capabilities import OPENROUTER_NOT_SELECTED, normalize_gemini_api_model, subscription_probe
+from ringer_costs import (
+    DEFAULT_LEDGER_FILE, GEMINI_API_RATES, GEMINI_CREDIT_LEDGER_FILE, SpendLedger,
+    billing_preflight, estimate_event, inspect_usage_snapshot, parse_usage_lines, validate_cost_policy,
+)
 from ringer_delegation import catalogue_usd, prepare_openrouter_dispatch
 
 GEMINI_QUOTA_URL = "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus"
@@ -476,18 +480,62 @@ def enforce_openrouter_command(command: list[str], model: str, spec: str) -> lis
     return command
 
 
+def enforce_gemini_api_command(command: list[str], model: str, spec: str, *,
+                               taskdir: Path, full_access: bool) -> None:
+    if not command or command[-1] != spec:
+        raise ValueError("billing requires the Gemini API spec as the final argument")
+    cwd, forwarded_model, forwarded_spec, wrapper = parse_gemini_api_args(command[1:])
+    canonical = normalize_gemini_api_model(model)
+    if forwarded_spec != spec or normalize_gemini_api_model(forwarded_model) != canonical:
+        raise ValueError("billing requires the forwarded Gemini API model and spec to match the task")
+    if canonical not in GEMINI_API_RATES:
+        raise ValueError("Gemini AI Studio model has no dated pricing")
+    if cwd and (taskdir / cwd).resolve() != taskdir.resolve():
+        raise ValueError("Gemini AI Studio worker must run in the task directory")
+    if Path(command[0]).name == "gemini_api_worker.py" and not full_access and not wrapper:
+        raise ValueError("restricted Gemini AI Studio worker requires --sandbox-wrapper")
+
+
+def gemini_fallback_enabled(policy: dict[str, Any]) -> bool:
+    return (
+        policy.get("gemini_credit_fallback") is True
+        and policy.get("automatic_paid_fallback") is True
+        and "fx" in policy
+        and Decimal(policy.get("monthly_gemini_api_cap_usd", "0")) > 0
+    )
+
+
+def _confirmed_gemini_exhaustion(snapshot: dict[str, Any], max_age_seconds: int) -> bool:
+    # Inspection can stop at the first exhausted window. Reuse its validation
+    # with exhausted windows masked to confirm that all other evidence is valid.
+    limits = snapshot["rateLimitsByLimitId"]["gemini"]
+    masked = {**limits}
+    exhausted = False
+    for name in ("primary", "secondary"):
+        window = limits.get(name)
+        if isinstance(window, dict) and window.get("usedPercent") == 100:
+            masked[name] = {**window, "usedPercent": 99}
+            exhausted = True
+    return exhausted and inspect_usage_snapshot(
+        {**snapshot, "rateLimitsByLimitId": {"gemini": masked}},
+        max_age_seconds=max_age_seconds, limit_key="gemini",
+    ).available
+
+
 @dataclass
 class Admission:
     allowed: bool
     evidence: dict[str, Any]
     policy: dict[str, Any] | None = None
     openrouter_bounds: tuple[int, int] | None = None
+    ledger_filename: str = DEFAULT_LEDGER_FILE
 
 
 async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 route: str | None, allowance: Any, command: list[str], spec: str,
                 taskdir: Path, state_dir: Path, run_id: str, task_key: str,
-                attempt: int, timeout_s: float = 10, task_class: str = "") -> tuple[Admission, list[str]]:
+                attempt: int, timeout_s: float = 10, task_class: str = "",
+                gemini_fallback: bool = False, full_access: bool = False) -> tuple[Admission, list[str]]:
     evidence = dict(billing_route=route, observed_auth_mode=None, quota_observed_at=None,
                     reservation_id=None, reservation_status="not_reserved", billing_status="BLOCKED",
                     billing_attempt_index=attempt, usage_coverage="unknown", cost_coverage="unknown")
@@ -496,6 +544,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
         return Admission(False, evidence), command
     try:
         openrouter_bounds = None
+        ledger_filename = DEFAULT_LEDGER_FILE
         # Re-read policy for each attempt, so a reduced cap takes effect on retry.
         policy = validate_cost_policy(json.loads(policy_path.read_text(encoding="utf-8")))
         if route is None:
@@ -527,6 +576,16 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
             input_bound, output_bound = _command_token_bounds(command)
             assert input_bound is not None and output_bound is not None
             openrouter_bounds = (input_bound, output_bound)
+        elif engine == "gemini-api":
+            if route != "api" or task_class in {"coordination", "consequential"}:
+                return blocked("Gemini AI Studio requires an explicit API route on an eligible task", "permission")
+            if gemini_fallback and not gemini_fallback_enabled(policy):
+                return blocked("Gemini AI Studio fallback requires both paid fallback flags and a monthly credit cap", "permission")
+            try:
+                enforce_gemini_api_command(command, model, spec, taskdir=taskdir, full_access=full_access)
+            except ValueError as exc:
+                return blocked(str(exc), "permission")
+            ledger_filename = GEMINI_CREDIT_LEDGER_FILE
         elif engine == "claude":
             return blocked(
                 "no Claude subscription is available. " + OPENROUTER_NOT_SELECTED,
@@ -550,7 +609,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
                 )
         else:
             return blocked("billing auth evidence unavailable for this engine", "permission")
-        if route == "api" and "run_api_cap_gbp" not in policy:
+        if route == "api" and engine != "gemini-api" and "run_api_cap_gbp" not in policy:
             return blocked("paid API requires an explicit run_api_cap_gbp", "unknown")
         if engine in {"opencode", "openrouter"}:
             bounds = openrouter_bounds or (None, None)
@@ -569,6 +628,10 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
             # dispatch.
             snapshot = {"observed_auth_mode": None, "plan_type": None,
                         "observed_at": None, "rateLimitsByLimitId": {}}
+        elif engine == "gemini-api":
+            # Budget admission does not access or attest credentials.
+            snapshot = {"observed_auth_mode": None, "observed_at": None,
+                        "plan_type": None, "rateLimitsByLimitId": {}}
         elif engine == "gemini":
             snapshot = await observe_gemini_account(timeout_s=timeout_s)
         else:
@@ -585,6 +648,13 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
             billing_route=route, run_id=run_id)
         if not decision.allow:
             reason = decision.reason
+            if (
+                engine == "gemini"
+                and reason == "subscription quota exhausted; no automatic route switch"
+                and gemini_fallback_enabled(policy)
+                and _confirmed_gemini_exhaustion(snapshot, policy["snapshot_max_age_seconds"])
+            ):
+                evidence["gemini_quota_exhausted"] = True
             kind = ("permission" if "auth" in reason or "route" in reason and "quota" not in reason
                     else "quota" if "quota" in reason or "primary" in reason or "usedPercent" in reason
                     else "unknown")
@@ -595,7 +665,7 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
         evidence.update(billing_status="ADMITTED", billing_reason=decision.reason,
                         reservation_id=decision.reservation_id,
                         reservation_status="reserved" if decision.reservation_id else "not_applicable")
-        return Admission(True, evidence, policy, openrouter_bounds), command
+        return Admission(True, evidence, policy, openrouter_bounds, ledger_filename), command
     except GeminiQuotaEvidenceError as exc:
         return blocked(str(exc), "quota")
     except AccountEvidenceError as exc:
@@ -606,8 +676,11 @@ async def admit(*, policy_path: Path, engine: str, binary: str, model: str,
 
 def usage_evidence(text: str, model: str, *, complete: bool, policy: dict[str, Any] | None = None,
                    service_tier: str | None = None,
-                   openrouter_bounds: tuple[int, int] | None = None) -> dict[str, Any]:
+                   openrouter_bounds: tuple[int, int] | None = None,
+                   gemini_api: bool = False) -> dict[str, Any]:
     """Only usage events, never prompts or full log payloads, enter billing state."""
+    if gemini_api:
+        model = normalize_gemini_api_model(model)
     try:
         events = parse_usage_lines(text.splitlines(), expected_model=model, service_tier=service_tier)
     except ValueError as exc:
@@ -659,7 +732,17 @@ def usage_evidence(text: str, model: str, *, complete: bool, policy: dict[str, A
     totals = [e.input_tokens + e.output_tokens if e.input_tokens is not None and e.output_tokens is not None
               else e.total_tokens for e in token_events]
     known_total = bool(totals) and all(t is not None for t in totals)
-    estimates = [estimate_event(e, pricing=(policy or {}).get("pricing")) for e in events]
+    cost_evidence = {}
+    if gemini_api:
+        estimates = [estimate_event(e, prefer_actual=False) for e in events]
+        if complete and detailed and all(
+            e.model == model
+            and quote.coverage == "gemini-api-standard" and quote.amount is not None
+            for e, quote in zip(events, estimates)
+        ):
+            cost_evidence["estimated_cost_usd"] = str(sum(quote.amount for quote in estimates))
+    else:
+        estimates = [estimate_event(e, pricing=(policy or {}).get("pricing")) for e in events]
     thread_id = next((e.session_id for e in events if e.session_id), None)
     if thread_id is None:
         for line in text.splitlines():
@@ -678,7 +761,7 @@ def usage_evidence(text: str, model: str, *, complete: bool, policy: dict[str, A
                 usage_events=serialise([asdict(e) for e in events]),
                 cost_estimates=serialise([asdict(e) for e in estimates]),
                 worker_tokens=sum(totals) if known_total else None,
-                thread_id=thread_id, **openrouter_evidence)
+                thread_id=thread_id, **openrouter_evidence, **cost_evidence)
 
 
 def settle_admission(admission: Admission, state_dir: Path, usage: dict[str, Any]) -> None:
@@ -688,11 +771,23 @@ def settle_admission(admission: Admission, state_dir: Path, usage: dict[str, Any
     if identity is None:
         return
     evidence["reservation_status"] = "unresolved"
-    ledger = SpendLedger(state_dir)
+    ledger = SpendLedger(
+        state_dir, filename=admission.ledger_filename,
+        missing="fail" if admission.ledger_filename == GEMINI_CREDIT_LEDGER_FILE else "empty",
+    )
     if admission.openrouter_bounds is not None and usage.get("token_bound_exceeded") is True:
         if not ledger.record_token_overrun(identity):
             raise ValueError("could not record a token overrun for the started reservation")
     fx = (admission.policy or {}).get("fx")
+    if admission.ledger_filename == GEMINI_CREDIT_LEDGER_FILE:
+        estimated_usd = usage.get("estimated_cost_usd")
+        if estimated_usd is not None and fx:
+            estimated_gbp = Decimal(estimated_usd) * Decimal(fx["usd_to_gbp"])
+            source = f"Gemini AI Studio dated pricing estimate; FX {fx['dated']} {fx.get('source', 'policy')}"
+            if ledger.settle(identity, estimated_gbp, source=source):
+                evidence.update(reservation_status="settled", cost_coverage="dated_estimate",
+                                actual_cost_usd=None, estimated_cost_gbp=str(estimated_gbp), fx=fx)
+        return
     if usage.get("cost_coverage") == "provider_actual" and usage.get("actual_cost_usd") is not None and fx:
         try:
             actual = Decimal(usage["actual_cost_usd"]) * Decimal(fx["usd_to_gbp"])

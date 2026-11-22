@@ -316,6 +316,9 @@ class SubscriptionAdmissionTests(unittest.TestCase):
                 self.assertFalse((runtime.taskdir / "out.txt").exists())
                 self.assertEqual(0, probes)
 
-    def test_policy_still_rejects_gemini_credit_fallback(self):
-        with self.assertRaisesRegex(ValueError, r"unknown cost policy keys: \['gemini_credit_fallback'\]"):
-            validate_cost_policy({"subscription_auth_modes": ["antigravity"], "gemini_credit_fallback": False})
+    def test_policy_defaults_to_no_gemini_credit_fallback_and_validates_opt_in(self):
+        policy = {"subscription_auth_modes": ["antigravity"]}
+        self.assertFalse(validate_cost_policy(policy).get("gemini_credit_fallback", False))
+        self.assertIs(validate_cost_policy({**policy, "gemini_credit_fallback": False})["gemini_credit_fallback"], False)
+        with self.assertRaisesRegex(ValueError, "gemini_credit_fallback must be boolean"):
+            validate_cost_policy({**policy, "gemini_credit_fallback": "false"})

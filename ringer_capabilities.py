@@ -75,12 +75,10 @@ def subscription_probe(engine: str) -> SubscriptionProbe:
     if engine == "gemini":
         return SubscriptionProbe(
             "gemini",
-            False,
-            "Antigravity agy subscription admission is not implemented. "
-            "Documented sign-in uses the OS keyring or an interactive browser "
-            "flow, and the command list has no headless auth-status command. "
-            "GEMINI_API_KEY and GOOGLE_API_KEY are not this subscription. "
-            "The keyring is not read.",
+            True,
+            "Antigravity agy subscription admission requires OAuth from the OS keyring "
+            "or agy token file and fresh 5-hour and weekly quota from fetchQuotaStatus. "
+            "The worker strips GEMINI_API_KEY and GOOGLE_API_KEY.",
         )
     if engine == "claude":
         return SubscriptionProbe(
@@ -98,7 +96,7 @@ def subscription_probe(engine: str) -> SubscriptionProbe:
 
 # Auth names below are the ones this repository actually implements or documents.
 # Codex subscription credits and OpenAI API credit balance are different accounts.
-# Grok OAuth and Antigravity OAuth are not probes this billing layer can read.
+# Grok OAuth has no billing admission probe.
 HARNESSES: dict[str, HarnessCapability] = {
     "codex": HarnessCapability(
         engine="codex",

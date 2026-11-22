@@ -158,17 +158,12 @@ class CapabilityMatrixTests(unittest.TestCase):
             )
             self.assertEqual("blocked", decision.status)
             self.assertIn("no Claude subscription", decision.reason)
-        for engine in ("grok", "gemini"):
-            open_route = assess_explicit_route(
-                engine=engine, model="grok-4.7" if engine == "grok" else "gemini-4-argon-medium",
-                billing_route="subscription", billing_policy_loaded=False,
-            )
-            self.assertEqual("allowed", open_route.status, engine)
-            closed = assess_explicit_route(
-                engine=engine, model=open_route.model, billing_route="subscription",
-                billing_policy_loaded=True,
-            )
-            self.assertEqual("blocked", closed.status, engine)
+        for engine, model in (("grok", "grok-4.7"), ("gemini", "gemini-4-argon-medium")):
+            for loaded in (False, True):
+                route = assess_explicit_route(
+                    engine=engine, model=model, billing_route="subscription", billing_policy_loaded=loaded,
+                )
+                self.assertEqual("blocked" if loaded and engine == "grok" else "allowed", route.status, engine)
 
     def test_explicit_route_is_kept_or_blocked_without_a_substitute(self) -> None:
         kept = assess_explicit_route(
@@ -312,7 +307,9 @@ class CapabilityMatrixTests(unittest.TestCase):
         self.assertTrue(codex.supported)
         self.assertIn("chatgpt", codex.reason)
         self.assertIn("api_key", codex.reason)
-        for probe in (grok, gemini, claude):
+        self.assertTrue(gemini.supported)
+        self.assertNotIn(secret, gemini.reason)
+        for probe in (grok, claude):
             self.assertFalse(probe.supported)
             self.assertNotIn(secret, probe.reason)
         self.assertIn("XAI_API_KEY", grok.reason)
@@ -409,14 +406,14 @@ class DispatchFailureTests(unittest.TestCase):
         self.assertFalse(self.marker.exists())
         self.assertFalse((self.root / "state" / "cost-reservations.json").exists())
 
-    def test_policy_loaded_unprobed_native_routes_do_not_run_or_fall_back(self) -> None:
+    def test_policy_loaded_native_routes_without_admission_do_not_run_or_fall_back(self) -> None:
         secret = "native-test-secret-not-a-subscription"
         cases = (
             ("grok", "grok-4.7", "subscription", "not subscription evidence"),
             ("grok", "grok-4.7", None, "not subscription evidence"),
             ("grok", "grok-4.7", "api", "no API-key route"),
             ("gemini", "gemini-4-argon-medium", "subscription", "keyring"),
-            ("gemini", "gemini-4-argon-medium", None, "keyring"),
+            ("gemini", "gemini-4-argon-medium", None, "explicit billing_route"),
             ("gemini", "gemini-4-argon-medium", "api", "no API-key route"),
             ("claude", "opus", "subscription", "no Claude subscription"),
             ("claude", "opus", None, "no Claude subscription"),

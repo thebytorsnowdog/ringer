@@ -348,7 +348,7 @@ class DispatchFailureTests(unittest.TestCase):
             "run_api_cap_gbp": "5",
             "automatic_paid_fallback": True,
             "subscription_auth_modes": ["chatgpt"],
-            "fx": {"usd_to_gbp": "0.8", "dated": "2026-11-08"},
+            "fx": {"usd_to_gbp": "0.8", "dated": datetime.now(timezone.utc).strftime("%Y-%m-%d")},
         }), encoding="utf-8")
         return path
 
@@ -522,7 +522,7 @@ class DispatchFailureTests(unittest.TestCase):
             "monthly_api_cap_gbp": "10", "run_api_cap_gbp": "1",
             "task_api_cap_gbp": "0.25", "paid_retries": False,
             "automatic_paid_fallback": False, "subscription_auth_modes": ["chatgpt"],
-            "fx": {"usd_to_gbp": "0.8", "dated": "2026-11-08"},
+            "fx": {"usd_to_gbp": "0.8", "dated": datetime.now(timezone.utc).strftime("%Y-%m-%d")},
         }), encoding="utf-8")
         manifest = ringer.Manifest.from_obj({
             "run_name": "table-select",

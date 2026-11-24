@@ -390,7 +390,7 @@ class BenchmarkContractTests(unittest.TestCase):
         policy = self.directory / 'policy.json'
         policy.write_text(json.dumps({
             'monthly_api_cap_gbp': 0, 'run_api_cap_gbp': 1,
-            'fx': {'usd_to_gbp': '0.8', 'dated': '2026-11-08'},
+            'fx': {'usd_to_gbp': '0.8', 'dated': datetime.now(timezone.utc).strftime('%Y-%m-%d')},
         }))
         admission, _ = asyncio.run(ringer_billing.admit(policy_path=policy, engine=task.engine,
             binary='unused-local-fixture', model=task.model, route=task.billing_route,

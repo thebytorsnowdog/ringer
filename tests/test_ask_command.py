@@ -518,7 +518,7 @@ class AskBillingTests(unittest.TestCase):
         self.policy = self.root / 'policy.json'
         self.policy.write_text(json.dumps(dict(
             monthly_api_cap_gbp=0, run_api_cap_gbp=0,
-            fx=dict(usd_to_gbp='0.8', dated='2026-11-08'),
+            fx=dict(usd_to_gbp='0.8', dated=datetime.now(timezone.utc).strftime('%Y-%m-%d')),
         )))
         self.config = ringer.AppConfig(path=None, identity_default='fixture', state_dir=self.root/'state',
             require_model_assessment=True,

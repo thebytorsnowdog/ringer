@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -239,7 +240,7 @@ class BillingIntegrationTests(unittest.TestCase):
 
     def test_opencode_explicit_api_route_reserves_without_an_account_probe(self):
         self.policy.write_text(json.dumps(dict(monthly_api_cap_gbp=10, run_api_cap_gbp=5,
-            fx=dict(usd_to_gbp='0.8', dated='2026-11-08'))))
+            fx=dict(usd_to_gbp='0.8', dated=datetime.now(timezone.utc).strftime('%Y-%m-%d')))))
         runner = self.opencode_runner()
         self.assertEqual(1, asyncio.run(runner.run()))
         self.assertEqual(0, runner.runtimes[0].attempts)
@@ -265,7 +266,7 @@ class BillingIntegrationTests(unittest.TestCase):
     def test_opencode_api_route_enforces_the_monthly_and_run_allowance_caps(self):
         self.policy.write_text(json.dumps(dict(
             monthly_api_cap_gbp='0.0000001', run_api_cap_gbp=5,
-            fx=dict(usd_to_gbp='0.8', dated='2026-11-08'),
+            fx=dict(usd_to_gbp='0.8', dated=datetime.now(timezone.utc).strftime('%Y-%m-%d')),
         )))
         runner = self.opencode_runner()
         self.assertEqual(1, asyncio.run(runner.run()))
